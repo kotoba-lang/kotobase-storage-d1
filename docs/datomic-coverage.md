@@ -55,3 +55,25 @@ Both local workerd+D1 and remote Cloudflare D1 verification cover:
 9. missing auth, wrong capability, cross-tenant access, replay, stale CAS,
    and CID collision rejection.
 
+## Indexed SQLite/D1 execution
+
+The D1 adapter maintains a rebuildable query projection at the same CAS
+boundary as the canonical mutable ref:
+
+- EAVT primary arrangement;
+- covering AEVT, AVET, and VAET indexes;
+- current datoms plus append-only transaction history;
+- an attribute-cardinality materialized view refreshed only for attributes
+  touched by a transaction (or all attributes after `retractEntity`);
+- projection-head equality as the admission check for every indexed read.
+
+SQL compilation is intentionally a semantics-preserving fast subset. Positive
+triple clauses, scalar inputs, joins, standard result shapes, named result
+maps, and a single `count` aggregate use SQLite. Flat forward pull and
+EAVT/AEVT/AVET/VAET `datoms` access use the same projection. Unsupported
+grammar and stale/missing projections use the canonical immutable-block
+hydrate path.
+
+This keeps compatibility monotonic: adding an optimization cannot turn a
+previously valid Datomic query into an invalid one, and a partially migrated
+database cannot return projected data from the wrong basis.
