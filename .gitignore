@@ -1,6 +1,7 @@
-.wrangler/
-.shadow-cljs/
 .cpcache/
-node_modules/
+.nbb/
+.shadow-cljs/
+.wrangler/
 dist/
 evidence.json
+node_modules/

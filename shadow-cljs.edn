@@ -1,17 +1,19 @@
+;; One ESM module that IS the Worker. This previously built a library of
+;; Datomic entry points which a hand-written src/worker.mjs imported and
+;; wrapped in its own hand-rolled CACAO auth; that .mjs is gone
+;; (ADR-2607268000), so the compiled module exports the fetch handler directly
+;; and wrangler.jsonc points `main` at it.
 {:deps true
  :builds
- {:engine
+ {:worker
   {:target :esm
    :output-dir "dist"
    :modules
-   {:kotobase-engine
-    {:entries [kotobase.storage.d1-worker]
-     :exports
-     {headD1 kotobase.storage.d1-worker/head-edn!
-      transactD1 kotobase.storage.d1-worker/transact-edn!
-      qD1 kotobase.storage.d1-worker/q-edn!
-      pullD1 kotobase.storage.d1-worker/pull-edn!
-      datomsD1 kotobase.storage.d1-worker/datoms-edn!}}}
+   {:worker
+    {:entries [kotobase.storage.d1-http]
+     :exports {:default kotobase.storage.d1-http/handler}}}
    :compiler-options {:optimizations :advanced
-                      :source-map false}}}}
-
+                      :source-map false
+                      ;; env.DB must survive property renaming -- see
+                      ;; externs/cloudflare.js and d1-auth/db-of.
+                      :externs ["externs/cloudflare.js"]}}}}

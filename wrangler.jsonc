@@ -1,7 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "kotobase-d1-auth-verification",
-  "main": "src/worker.mjs",
+  // The compiled ClojureScript module IS the Worker (shadow-cljs :worker
+  // build exports :default). There is no hand-written .mjs shell any more.
+  "main": "dist/worker.js",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
   "d1_databases": [

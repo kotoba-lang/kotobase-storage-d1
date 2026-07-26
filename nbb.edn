@@ -1,0 +1,8 @@
+;; The verification harness mints its own CACAOs, and mints them with the same
+;; library the Worker verifies with (cacao.edge.mint / cacao.edge.verify) so a
+;; divergence in SIWE reconstruction or CBOR key order fails the harness rather
+;; than silently passing a Worker that accepts something else.
+{:paths ["scripts"]
+ :deps {io.github.kotoba-lang/org-chainagnostic-cacao
+        {:git/url "https://github.com/kotoba-lang/org-chainagnostic-cacao.git"
+         :git/sha "b395935018d97ee281c9b4564f855c8242b438e7"}}}

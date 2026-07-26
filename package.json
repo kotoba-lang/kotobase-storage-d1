@@ -1,19 +1,22 @@
 {
   "private": true,
   "scripts": {
-    "build": "shadow-cljs release engine",
-    "check": "shadow-cljs compile engine",
+    "build": "shadow-cljs release worker",
+    "check": "shadow-cljs compile worker",
     "deploy": "npm run build && wrangler deploy",
     "dev": "npm run build && wrangler dev",
     "migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "verify:remote": "node scripts/verify.mjs",
-    "benchmark": "KOTOBASE_BENCH=1 node scripts/verify.mjs"
+    "verify:remote": "nbb scripts/verify.cljs",
+    "benchmark": "KOTOBASE_BENCH=1 nbb scripts/verify.cljs"
   },
   "devDependencies": {
     "wrangler": "4.114.0",
     "shadow-cljs": "3.4.11",
+    "nbb": "^1.3.198",
     "@ipld/dag-cbor": "^9.2.1",
+    "@noble/ciphers": "^1.2.0",
     "@noble/curves": "^1.7.0",
+    "@noble/hashes": "^1.6.0",
     "multiformats": "^13.3.1"
   }
 }

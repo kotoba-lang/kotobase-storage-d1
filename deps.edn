@@ -1,6 +1,27 @@
 {:paths ["src-cljs"]
+ ;; org-chainagnostic-cacao is THE CACAO implementation for this fleet
+ ;; (ADR-2607268000): CBOR envelope decode, base58btc did:key, SIWE message
+ ;; reconstruction, Ed25519 verification and the temporal window all live
+ ;; there and nowhere else. This Worker previously hand-rolled all five in
+ ;; src/worker.mjs and was missing the max-age ceiling, the resource-newline
+ ;; check and the strict ISO round-trip that cacao.edge.verify already had.
+ ;; Pinned at replay-until-sec, which the nonce table needs to size its own
+ ;; retention off the verifier's window rather than a TTL of its own.
+ ;;
+ ;; authorization supplies the allow/deny decision and its validity rules.
+ ;; It is NOT given a cacao dependency (deliberately: it stays usable for
+ ;; OAuth/WebAuthn principals too) -- this Worker is the consumer that wires
+ ;; a CACAO-shaped capability verifier into it. Only authorization.{core,
+ ;; model,ports} are reachable from here, and none of those three require
+ ;; anything, so langchain/journal stay out of the Worker bundle.
  :deps {thheller/shadow-cljs {:mvn/version "3.4.11"}
         org.clojure/clojurescript {:mvn/version "1.12.145"}
+        io.github.kotoba-lang/org-chainagnostic-cacao
+        {:git/url "https://github.com/kotoba-lang/org-chainagnostic-cacao.git"
+         :git/sha "b395935018d97ee281c9b4564f855c8242b438e7"}
+        io.github.kotoba-lang/authorization
+        {:git/url "https://github.com/kotoba-lang/authorization.git"
+         :git/sha "c7cb7b43bbf48a5f4d71eeb7182a4334da816a48"}
         io.github.kotoba-lang/kotobase-storage
         {:local/root "../kotobase-storage"}
         io.github.kotoba-lang/kotobase-engine
