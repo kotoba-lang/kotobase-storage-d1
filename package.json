@@ -6,7 +6,8 @@
     "deploy": "npm run build && wrangler deploy",
     "dev": "npm run build && wrangler dev",
     "migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "verify:remote": "node scripts/verify.mjs"
+    "verify:remote": "node scripts/verify.mjs",
+    "benchmark": "KOTOBASE_BENCH=1 node scripts/verify.mjs"
   },
   "devDependencies": {
     "wrangler": "4.114.0",

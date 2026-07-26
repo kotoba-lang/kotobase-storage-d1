@@ -59,6 +59,44 @@ Verified boundaries:
   result shapes and `:keys`/`:strs`/`:syms`;
 - pull selectors and EAVT/AEVT/AVET/VAET datom access.
 
+## SQLite/D1 query projection
+
+The immutable block/ref model remains the portable source of truth, but D1
+queries no longer need to hydrate the complete block chain. Migration
+`0003_datomic_projection.sql` adds:
+
+- a current-datom table whose primary key is the EAVT arrangement;
+- covering AEVT, AVET, and VAET indexes;
+- append-only transaction/datom history;
+- a projection head, which must exactly match the canonical ref head before
+  the SQL fast path may be read;
+- incrementally refreshed per-attribute cardinality materialization.
+
+Projection mutations and the mutable-ref compare-and-set are published in one
+atomic D1 `batch()`. If a database predates the projection or its head is
+stale, query/pull/datoms safely use the canonical hydrate path.
+
+The SQL fast path currently covers positive triple-clause Datalog, scalar
+inputs, relation/scalar/collection/tuple result shapes, result maps, and
+single-variable `count`. Flat forward pull and all four current datom index
+orders are also indexed. Rules, negation, `or`, and function clauses retain
+the canonical engine fallback.
+
+Run the correctness suite against a local or remote endpoint:
+
+```bash
+KOTOBASE_D1_URL=http://127.0.0.1:8787 node scripts/verify.mjs
+```
+
+Run the same suite plus 300/3,000/15,000-datom performance probes:
+
+```bash
+KOTOBASE_D1_URL=http://127.0.0.1:8787 npm run benchmark
+```
+
+The benchmark validates every point, count, and join result before recording
+latency; it does not treat a fast error or empty response as a measurement.
+
 This is syntax-compatible rather than a claim of complete Datomic product
 compatibility. Kotobase uses CID heads instead of numeric basis-t/tx ids and
 does not implement Datomic's transactor administration, tempid allocation,

@@ -282,3 +282,113 @@ console.log(JSON.stringify({
   ref,
   datomicRef
 }, null, 2));
+
+function percentile(values, fraction) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor((sorted.length - 1) * fraction)];
+}
+
+async function timedCall(path, options) {
+  const started = performance.now();
+  const response = await call(path, options);
+  return {
+    ...response,
+    elapsedMs: performance.now() - started
+  };
+}
+
+if (process.env.KOTOBASE_BENCH === "1") {
+  const sizes = (process.env.KOTOBASE_BENCH_SIZES || "100,1000,5000")
+    .split(",")
+    .map(Number)
+    .filter((value) => Number.isInteger(value) && value > 0);
+  const benchmark = [];
+
+  for (const entityCount of sizes) {
+    const benchmarkRef =
+      `kotobase/db/${did}/benchmark-${entityCount}-${crypto.randomUUID()}`;
+    const entities = Array.from(
+      { length: entityCount },
+      (_, index) =>
+        `{:db/id "user-${index}" ` +
+        `:bench/email "user-${index}@example.test" ` +
+        `:bench/name "User ${index}" ` +
+        `:bench/role "${index % 10 === 0 ? "admin" : "member"}"}`
+    );
+    const txBody = `{:tx-data [${entities.join(" ")}]}`;
+    const transaction = await timedCall("/v1/transact", {
+      method: "POST",
+      auth: cacao(tx),
+      ref: benchmarkRef,
+      body: txBody
+    });
+    check(
+      `benchmark transact ${entityCount}`,
+      transaction.status,
+      200,
+      transaction.body
+    );
+
+    const probes = {
+      point:
+        `{:query [:find ?e . :where ` +
+        `[?e :bench/email "user-${entityCount - 1}@example.test"]]}`,
+      count:
+        `{:query [:find (count ?e) . ` +
+        `:where [?e :bench/email _]]}`,
+      join:
+        `{:query [:find (count ?e) . :where ` +
+        `[?e :bench/role "admin"] [?e :bench/name ?name]]}`
+    };
+    const measurements = {};
+
+    for (const [name, query] of Object.entries(probes)) {
+      const samples = [];
+      for (let iteration = 0; iteration < 6; iteration += 1) {
+        const measured = await timedCall("/v1/q", {
+          method: "POST",
+          auth: cacao(read),
+          ref: benchmarkRef,
+          body: query
+        });
+        check(
+          `benchmark ${name} ${entityCount}`,
+          measured.status,
+          200,
+          measured.body
+        );
+        const expected =
+          name === "point" ? `"user-${entityCount - 1}"` :
+          name === "join" ? String(Math.ceil(entityCount / 10)) :
+          String(entityCount);
+        check(
+          `benchmark ${name} result ${entityCount}`,
+          measured.body,
+          expected,
+          measured.body
+        );
+        if (iteration > 0) samples.push(measured.elapsedMs);
+      }
+      measurements[name] = {
+        p50Ms: percentile(samples, 0.5),
+        minMs: Math.min(...samples),
+        maxMs: Math.max(...samples)
+      };
+    }
+
+    benchmark.push({
+      entityCount,
+      datomCount: entityCount * 3,
+      txRequestBytes: Buffer.byteLength(txBody),
+      transactionMs: transaction.elapsedMs,
+      measurements
+    });
+  }
+
+  console.log(JSON.stringify({
+    benchmark: "d1-datomic-projection-v1",
+    endpoint,
+    samplesPerQuery: 5,
+    results: benchmark
+  }, null, 2));
+}

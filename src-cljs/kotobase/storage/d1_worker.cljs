@@ -6,6 +6,7 @@
   (:require [cljs.reader :as reader]
             [kotobase.datomic :as d]
             [kotobase.engine :as engine]
+            [kotobase.storage.d1-projection :as projection]
             [kotobase.storage.core :as storage]))
 
 (defn- invoke [target method & args]
@@ -33,7 +34,7 @@
              (= (aget left index) (aget right index)) (recur (inc index))
              :else false)))))
 
-(defrecord D1Storage [db]
+(defrecord D1Storage [db projection-plan]
   storage/IBlockStore
   (-put-blocks! [_ blocks]
     (-> (js/Promise.all
@@ -103,23 +104,33 @@
               :version (aget row "revision")})))))
 
   (-compare-and-set-ref! [this name expected next]
-    (let [statement
-          (if (nil? expected)
-            (prepared
-             db
-             "INSERT INTO kotobase_refs(name, cid, revision, updated_at)
-              VALUES (?, ?, 1, ?) ON CONFLICT(name) DO NOTHING"
-             [name next (.now js/Date)])
-            (prepared
-             db
-             "UPDATE kotobase_refs
-              SET cid = ?, revision = revision + 1, updated_at = ?
-              WHERE name = ? AND cid = ?"
-             [next (.now js/Date) name expected]))]
-      (-> (invoke statement "run")
+    (let [publish
+          (if projection-plan
+            (projection/projected-cas!
+             db name expected next projection-plan)
+            (let [statement
+                  (if (nil? expected)
+                    (prepared
+                     db
+                     "INSERT INTO kotobase_refs(name, cid, revision, updated_at)
+                      VALUES (?, ?, 1, ?) ON CONFLICT(name) DO NOTHING"
+                     [name next (.now js/Date)])
+                    (prepared
+                     db
+                     "UPDATE kotobase_refs
+                      SET cid = ?, revision = revision + 1, updated_at = ?
+                      WHERE name = ? AND cid = ?"
+                     [next (.now js/Date) name expected]))]
+              (-> (invoke statement "run")
+                  (.then
+                   (fn [result]
+                     {:published?
+                      (= 1 (aget (aget result "meta") "changes"))
+                      :current next})))))]
+      (-> publish
           (.then
-           (fn [result]
-             (if (= 1 (aget (aget result "meta") "changes"))
+           (fn [{:keys [published?]}]
+             (if published?
                {:published? true :current next :version nil}
                (-> (storage/-read-ref this name)
                    (.then
@@ -133,14 +144,16 @@
     #{:immutable-blocks :cid-addressed-read :conditional-ref
       :linearizable-ref :batch-get :batch-put :cloudflare-d1}))
 
-(defn- database [db ref-name]
+(defn- database
+  ([db ref-name] (database db ref-name nil))
+  ([db ref-name projection-plan]
   (engine/open
-   {:storage (->D1Storage db)
+   {:storage (->D1Storage db projection-plan)
     :ref-name ref-name
     :encrypt-fn #(js/Promise.resolve %)
     :decrypt-fn #(js/Promise.resolve %)
     :blind-fn #(js/Promise.resolve (pr-str %))
-    :visible? (constantly true)}))
+    :visible? (constantly true)})))
 
 (defn- read-edn [source]
   (reader/read-string source))
@@ -153,20 +166,37 @@
   (edn-promise (engine/head (database db ref-name))))
 
 (defn ^:export transact-edn! [db ref-name source]
-  (let [request (read-edn source)]
-    (edn-promise (d/transact (database db ref-name) request))))
+  (let [request (read-edn source)
+        plan (projection/transaction-plan request)]
+    (edn-promise
+     (d/transact (database db ref-name plan) request))))
 
 (defn ^:export q-edn! [db ref-name source]
   (let [{:keys [query args]} (read-edn source)]
-    (edn-promise
-     (apply d/q query (database db ref-name) (or args [])))))
+    (-> (projection/fast-q! db ref-name query (or args []))
+        (.then
+         (fn [{:keys [used? value]}]
+           (if used?
+             (pr-str value)
+             (edn-promise
+              (apply d/q query (database db ref-name) (or args [])))))))))
 
 (defn ^:export pull-edn! [db ref-name source]
   (let [{:keys [selector eid]} (read-edn source)]
-    (edn-promise
-     (d/pull (database db ref-name) selector eid))))
+    (-> (projection/fast-pull! db ref-name selector eid)
+        (.then
+         (fn [{:keys [used? value]}]
+           (if used?
+             (pr-str value)
+             (edn-promise
+              (d/pull (database db ref-name) selector eid))))))))
 
 (defn ^:export datoms-edn! [db ref-name source]
   (let [options (read-edn source)]
-    (edn-promise
-     (d/datoms (database db ref-name) options))))
+    (-> (projection/fast-datoms! db ref-name options)
+        (.then
+         (fn [{:keys [used? value]}]
+           (if used?
+             (pr-str value)
+             (edn-promise
+              (d/datoms (database db ref-name) options))))))))
