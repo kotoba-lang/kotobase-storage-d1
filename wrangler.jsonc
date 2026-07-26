@@ -1,6 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "kotobase-d1-auth-verification",
+  // Renamed from kotobase-d1-auth-verification (2026-07-26): this deployment
+  // now backs a real Tier 2 (ADR-2607260930) production consumer
+  // (gftdcojp/aozora-engine), not just the initial auth/CID-bridge
+  // verification pass -- "verification" in the name and route no longer
+  // described what it does. The original Worker/route are torn down
+  // alongside this rename, not left running orphaned.
+  "name": "kotobase-storage-d1",
   "main": "src/worker.mjs",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
@@ -15,7 +21,7 @@
   // existing, already-provisioned zone rather than adding a new one.
   "routes": [
     {
-      "pattern": "kotobase-d1-verification.aozora.app",
+      "pattern": "kotobase-storage-d1.aozora.app",
       "custom_domain": true
     }
   ],
