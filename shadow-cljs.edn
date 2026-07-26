@@ -9,6 +9,9 @@
      :exports
      {headD1 kotobase.storage.d1-worker/head-edn!
       basisD1 kotobase.storage.d1-worker/basis-edn!
+      txRangeD1 kotobase.storage.d1-worker/tx-range-edn!
+      listenerD1 kotobase.storage.d1-worker/listener-edn!
+      adminD1 kotobase.storage.d1-worker/admin-edn!
       transactD1 kotobase.storage.d1-worker/transact-edn!
       reindexD1 kotobase.storage.d1-worker/reindex-edn!
       qD1 kotobase.storage.d1-worker/q-edn!

@@ -40,6 +40,11 @@ vectors, and pull selectors are not weakened into an ad-hoc JSON query DSL:
 - `POST /v1/q` — `{:query [:find ...] :args [...]}`
 - `POST /v1/pull` — `{:selector [...] :eid ...}`
 - `POST /v1/datoms` — `{:index :eavt :components [...]}`
+- `POST /v1/tx-range` — `{:start 0 :end nil :limit 100}`
+- `POST /v1/listeners/register` — `{:op :register :consumer "worker-a" :since 0}`
+- `POST /v1/listeners/poll` — `{:op :poll :consumer "worker-a" :limit 100}`
+- `POST /v1/listeners/ack` — `{:op :ack :consumer "worker-a" :t 42}`
+- `GET /v1/admin/status`
 - `GET /v1/head`
 - `GET /v1/basis` — `{:basis-cid ... :basis-t ...}`
 
@@ -118,6 +123,17 @@ cross-entity collisions in the same atomic ref-CAS batch. Schema validation is
 tied to the canonical head; a concurrent schema change forces the transaction
 to retry validation.
 
+Tuple attributes use the ordinary Datomic declarations `:db/tupleAttrs`,
+`:db/tupleTypes`, or `:db/tupleType`. Composite tuple values are derived and
+updated atomically with their constituent attributes, so a
+`:db.unique/identity` composite can enforce multi-attribute identity and serve
+as a lookup ref.
+
+Persisted transaction functions use `:db.type/fn` and `:db/fn`, but the stored
+body is a bounded, declarative `kotobase/tx-ir-v1` template rather than
+arbitrary Clojure source. This preserves Datomic invocation syntax while
+keeping Worker execution deterministic and free of `eval`.
+
 Bulk datom additions, retractions, history, and touched-attribute refreshes use
 set-based JSON/SQL statements rather than one D1 request per datom. Transactions
 against a ref with no installed schema keep a zero-lookup preparation path;
@@ -144,10 +160,12 @@ KOTOBASE_D1_URL=http://127.0.0.1:8787 npm run benchmark
 The benchmark validates every point, count, and join result before recording
 latency; it does not treat a fast error or empty response as a measurement.
 
-This is API-compatible database behavior rather than a claim that Kotobase is
-the Datomic product. Kotobase exposes a gapless chain sequence as `basis-t` and
-retains the immutable basis CID alongside it. Datomic's hosted transactor
-administration and deployment control plane remain outside this library. See
+Migration `0006_datomic_admin.sql` adds an atomic transaction outbox and
+durable consumer cursors. In-process users can use `d/listen`; D1 consumers use
+the register/poll/ack endpoints, which survive Worker restarts. The
+administration endpoint reports canonical/projection heads, counts, listener
+state, and latest transaction sequence. This is database administration, not a
+claim to reproduce Datomic Cloud's deployment control plane. See
 `docs/datomic-coverage.md` for the exact boundary.
 
 The deploy shell uses the same CACAO SIWE canonicalization as
