@@ -5,7 +5,8 @@ import {
   cacaoSiweMessage, graphCidFromName, looksLikeGraphCid
 } from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
 import {
-  headD1, basisD1, transactD1, reindexD1, qD1, pullD1, datomsD1
+  headD1, basisD1, transactD1, reindexD1, qD1, pullD1, datomsD1,
+  foldD1, viewD1
 } from "../dist/kotobase-engine.js";
 
 const TX_CAPABILITY = "kotoba://can/datom:transact";
@@ -334,6 +335,12 @@ export default {
           (db, ref, source) => reindexD1(db, ref, source)
         );
       }
+      if (request.method === "POST" && url.pathname === "/v1/fold") {
+        return datomicRequest(
+          request, env, authn, "datomic/fold", TX_CAPABILITY,
+          (db, ref, source) => foldD1(db, ref, source)
+        );
+      }
       if (request.method === "POST" && url.pathname === "/v1/q") {
         return datomicRequest(
           request, env, authn, "datomic/q", READ_CAPABILITY,
@@ -350,6 +357,12 @@ export default {
         return datomicRequest(
           request, env, authn, "datomic/datoms", READ_CAPABILITY,
           (db, ref, source) => datomsD1(db, ref, source)
+        );
+      }
+      if (request.method === "POST" && url.pathname === "/v1/view") {
+        return datomicRequest(
+          request, env, authn, "datomic/view", READ_CAPABILITY,
+          (db, ref, source) => viewD1(db, ref, source)
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/head") {
