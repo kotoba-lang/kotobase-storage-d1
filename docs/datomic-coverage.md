@@ -34,6 +34,13 @@ Implemented syntax:
   and `index-range`
 - `:db.fn/cas`, `:db.fn/retractAttribute`, `:db.fn/retractEntity`, and
   application-registered pure transaction functions
+- homogeneous, heterogeneous, and composite tuple attributes via
+  `:db/tupleType`, `:db/tupleTypes`, and `:db/tupleAttrs`
+- persisted `:db.type/fn` transaction functions in the bounded
+  `kotobase/tx-ir-v1` declarative format
+- `tx-range`, in-process `listen` / `unlisten`, and D1 durable
+  register/poll/ack listener cursors
+- D1 database administration status for canonical/projection health and counts
 
 ## Deliberate differences from Datomic
 
@@ -43,16 +50,18 @@ Kotobase is not the Datomic product and does not pretend otherwise:
   transaction entity ids;
 - entity ids allocated for tempids are stable Kotobase strings rather than
   Datomic partition-encoded longs;
-- application transaction functions are registered as trusted host functions;
-  arbitrary persisted Clojure source is not evaluated inside a Worker;
-- listeners and Datomic's deployment/transactor administration are outside the
-  provider-neutral database API;
+- trusted host transaction functions remain available, while persisted
+  functions are a portable declarative transaction IR; arbitrary persisted
+  Clojure source is not evaluated inside a Worker;
+- Kotobase supplies transaction reports, durable D1 listeners, and database
+  health administration, but Datomic Cloud's deployment/topology control plane
+  is outside this storage adapter;
 - values in the current underlying peer engine retain its existing wire
   representation rules; Datomic's complete scalar/schema semantics are not
   claimed;
-- schema enforcement currently covers string, boolean, long, double, keyword,
-  ref, instant, UUID, and symbol values. Datomic tuple attributes and schema
-  alteration are not yet part of the D1 facade.
+- schema enforcement covers string, boolean, long, double, keyword, ref,
+  instant, UUID, symbol, function, and tuple values. Installed schema remains
+  immutable; schema alteration is not part of the D1 facade.
 
 The D1 HTTP facade accepts `:as-of`, `:since`, or `:history true` in the EDN
 envelope for `q`, `pull`, and `datoms`; `GET /v1/basis` returns the immutable
@@ -73,8 +82,12 @@ D1 Worker. The current feature matrix is exercised locally end to end:
 8. persisted head resolution;
 9. tempid allocation, identity upsert, lookup refs, and compare-and-swap;
 10. as-of, since, and assertion/retraction history reads;
-11. missing auth, wrong capability, cross-tenant access, replay, stale CAS,
-    and CID collision rejection.
+11. composite tuple identity and lookup-ref upsert;
+12. persisted declarative transaction functions;
+13. durable transaction range, listener register/poll/ack, and administration
+    status;
+14. missing auth, wrong capability, cross-tenant access, replay, stale CAS,
+    CID collision, uniqueness, and value-type rejection.
 
 ## Indexed SQLite/D1 execution
 
@@ -99,7 +112,9 @@ An operator can explicitly rebuild a missing/stale projection with
 `POST /v1/reindex`. Rebuild insertion is chunked, but projection publication is
 one D1 transaction conditional on the canonical ref still naming the hydrated
 head. Reindex reconstructs current state and schema-derived arrangements;
-append-only pre-projection history cannot be inferred from a current snapshot.
+append-only pre-projection datom history cannot be inferred from a current
+snapshot. Canonical `d/tx-range` can still read transaction blocks from the
+immutable chain; the D1 durable outbox begins when migration 0006 is active.
 
 This keeps compatibility monotonic: adding an optimization cannot turn a
 previously valid Datomic query into an invalid one, and a partially migrated

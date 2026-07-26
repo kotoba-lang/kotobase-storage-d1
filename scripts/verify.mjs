@@ -287,9 +287,32 @@ result = await call("/v1/transact", {
             :db/cardinality :db.cardinality/one
             :db/unique :db.unique/identity}
            {:db/id :account/age
-            :db/ident :account/age
+           :db/ident :account/age
             :db/valueType :db.type/long
             :db/cardinality :db.cardinality/one}
+           {:db/id :account/tenant
+            :db/ident :account/tenant
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one}
+           {:db/id :account/external-id
+            :db/ident :account/external-id
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one}
+           {:db/id :account/tenant+external
+            :db/ident :account/tenant+external
+            :db/valueType :db.type/tuple
+            :db/tupleAttrs [:account/tenant :account/external-id]
+            :db/cardinality :db.cardinality/one
+            :db/unique :db.unique/identity}
+           {:db/id :account/status
+            :db/ident :account/status
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one}
+           {:db/id :fn/set-account-status
+            :db/ident :fn/set-account-status
+            :db/fn {:lang "kotobase/tx-ir-v1"
+                    :params [db entity status]
+                    :code [[:db/add entity :account/status status]]}}
            {:db/id "account-1"
             :account/email "alice@example.test"
             :account/age 42}]}`
@@ -354,6 +377,85 @@ result = await call("/v1/transact", {
             :account/age 43 44]]}`
 });
 check("lookup-ref transaction function", result.status, 200, result.body);
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [{:db/id -10
+            :account/tenant "tenant-1"
+            :account/external-id "external-1"
+            :account/status "invited"}]}`
+});
+check("composite tuple entity", result.status, 200, result.body);
+const tupleEntityMatch = result.body.match(/:tempids \{-10 "([^"]+)"\}/);
+if (!tupleEntityMatch) {
+  throw new Error(`Datomic tuple tempid report mismatch: ${result.body}`);
+}
+const tupleEntity = tupleEntityMatch[1];
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [{:db/id -11
+            :account/tenant "tenant-1"
+            :account/external-id "external-1"}]}`
+});
+check("composite tuple identity upsert", result.status, 200, result.body);
+if (!result.body.includes(`:tempids {-11 "${tupleEntity}"}`)) {
+  throw new Error(`Datomic tuple upsert mismatch: ${result.body}`);
+}
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [[:fn/set-account-status
+            [:account/tenant+external ["tenant-1" "external-1"]]
+            "active"]]}`
+});
+check("persisted declarative transaction function",
+      result.status, 200, result.body);
+
+result = await call("/v1/listeners/register", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:op :register :consumer "verify-listener" :since 0}`
+});
+check("durable listener registration", result.status, 200, result.body);
+
+result = await call("/v1/tx-range", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:start 0 :limit 100}`
+});
+check("durable transaction range", result.status, 200, result.body);
+if (!result.body.includes(`:tx-cid`) ||
+    !result.body.includes(`:account/status`)) {
+  throw new Error(`Datomic tx-range mismatch: ${result.body}`);
+}
+
+result = await call("/v1/listeners/poll", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:op :poll :consumer "verify-listener" :limit 100}`
+});
+check("durable listener poll", result.status, 200, result.body);
+const listenerTMatch = result.body.match(/:t\s+(\d+)/);
+if (!listenerTMatch) {
+  throw new Error(`Datomic listener poll mismatch: ${result.body}`);
+}
+
+result = await call("/v1/listeners/ack", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:op :ack :consumer "verify-listener"
+          :t ${listenerTMatch[1]}}`
+});
+check("durable listener acknowledgement", result.status, 200, result.body);
+
+result = await call("/v1/admin/status", {
+  auth: cacao(tx), ref: schemaRef
+});
+check("Datomic administration status", result.status, 200, result.body);
+if (!result.body.includes(`:projected? true`) ||
+    !result.body.includes(`:transactions`)) {
+  throw new Error(`Datomic admin status mismatch: ${result.body}`);
+}
 
 result = await call("/v1/q", {
   method: "POST", auth: cacao(read), ref: schemaRef,
