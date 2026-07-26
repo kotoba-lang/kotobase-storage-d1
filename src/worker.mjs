@@ -5,8 +5,8 @@ import {
   cacaoSiweMessage, graphCidFromName, looksLikeGraphCid
 } from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
 import {
-  headD1, basisD1, transactD1, reindexD1, qD1, pullD1, datomsD1,
-  foldD1, viewD1
+  headD1, basisD1, txRangeD1, listenerD1, adminD1,
+  transactD1, reindexD1, qD1, pullD1, datomsD1, foldD1, viewD1
 } from "../dist/kotobase-engine.js";
 
 const TX_CAPABILITY = "kotoba://can/datom:transact";
@@ -375,6 +375,33 @@ export default {
         return datomicRequest(
           request, env, authn, "datomic/basis", READ_CAPABILITY,
           (db, ref, source) => basisD1(db, ref, source)
+        );
+      }
+      if (request.method === "POST" && url.pathname === "/v1/tx-range") {
+        return datomicRequest(
+          request, env, authn, "datomic/tx-range", READ_CAPABILITY,
+          (db, ref, source) => txRangeD1(db, ref, source)
+        );
+      }
+      if (request.method === "POST" &&
+          url.pathname === "/v1/listeners/poll") {
+        return datomicRequest(
+          request, env, authn, "datomic/listener-poll", READ_CAPABILITY,
+          (db, ref, source) => listenerD1(db, ref, source)
+        );
+      }
+      if (request.method === "POST" &&
+          (url.pathname === "/v1/listeners/register" ||
+           url.pathname === "/v1/listeners/ack")) {
+        return datomicRequest(
+          request, env, authn, "datomic/listener-admin", TX_CAPABILITY,
+          (db, ref, source) => listenerD1(db, ref, source)
+        );
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/status") {
+        return datomicRequest(
+          request, env, authn, "datomic/admin", TX_CAPABILITY,
+          (db, ref, source) => adminD1(db, ref, source)
         );
       }
       return json({ ok: false, error: "NotFound" }, 404);

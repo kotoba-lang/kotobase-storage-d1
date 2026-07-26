@@ -52,8 +52,12 @@
   (when (and (keyword? attribute) (.startsWith (name attribute) "_"))
     (keyword (namespace attribute) (subs (name attribute) 1))))
 
-(defn- values-of [value]
-  (if (and (coll? value) (not (map? value)))
+(def ^:private schema-vector-attributes
+  #{:db/tupleAttrs :db/tupleTypes :db/fn})
+
+(defn- values-of [attribute value]
+  (if (and (coll? value) (not (map? value))
+           (not (contains? schema-vector-attributes attribute)))
     value
     [value]))
 
@@ -67,7 +71,7 @@
             (if-let [forward (reverse-attribute attribute)]
               {:kind :add :e item :a forward :v entity-id}
               {:kind :add :e entity-id :a attribute :v item}))
-          (values-of value))))
+          (values-of attribute value))))
      entity)))
 
 (defn- tx-item-ops [item]
@@ -89,16 +93,21 @@
 (def ^:private supported-value-types
   #{:db.type/string :db.type/boolean :db.type/long :db.type/double
     :db.type/keyword :db.type/ref :db.type/instant :db.type/uuid
-    :db.type/symbol})
+    :db.type/symbol :db.type/tuple :db.type/fn})
 
 (declare transaction-plan json-source)
 
 (defn- schema-definition [entity]
-  (when (and (map? entity) (contains? entity :db/ident))
+  (when (and (map? entity)
+             (contains? entity :db/ident)
+             (contains? entity :db/valueType))
     (let [attribute (:db/ident entity)
           value-type (:db/valueType entity)
           cardinality (:db/cardinality entity)
-          unique-kind (:db/unique entity)]
+          unique-kind (:db/unique entity)
+          tuple-attrs (:db/tupleAttrs entity)
+          tuple-types (:db/tupleTypes entity)
+          tuple-type (:db/tupleType entity)]
       (when-not (keyword? attribute)
         (throw (ex-info "Schema :db/ident must be a keyword"
                         {:type :kotobase.datomic/invalid-schema
@@ -121,16 +130,40 @@
                         {:type :kotobase.datomic/invalid-schema
                          :attribute attribute
                          :unique unique-kind})))
+      (when (= :db.type/tuple value-type)
+        (let [definitions (remove nil? [tuple-attrs tuple-types tuple-type])]
+          (when-not (= 1 (count definitions))
+            (throw (ex-info "Tuple schema requires exactly one tuple definition"
+                            {:type :kotobase.datomic/invalid-schema
+                             :attribute attribute})))
+          (when (and tuple-attrs
+                     (not (and (vector? tuple-attrs)
+                               (<= 2 (count tuple-attrs) 8)
+                               (every? keyword? tuple-attrs))))
+            (throw (ex-info "Invalid :db/tupleAttrs"
+                            {:type :kotobase.datomic/invalid-schema
+                             :attribute attribute})))
+          (when (and tuple-types
+                     (not (and (vector? tuple-types)
+                               (<= 2 (count tuple-types) 8)
+                               (every? supported-value-types tuple-types))))
+            (throw (ex-info "Invalid :db/tupleTypes"
+                            {:type :kotobase.datomic/invalid-schema
+                             :attribute attribute})))))
       {:a attribute
        :a-edn (encoded attribute)
        :value-type value-type
        :cardinality cardinality
-       :unique-kind unique-kind})))
+       :unique-kind unique-kind
+       :tuple-attrs tuple-attrs
+       :tuple-types tuple-types
+       :tuple-type tuple-type})))
 
 (defn- transaction-schema-definitions [request]
   (let [requested (if (map? request) (:tx-data request) request)
         schema-attributes
-        #{:db/ident :db/valueType :db/cardinality :db/unique}
+        #{:db/ident :db/valueType :db/cardinality :db/unique
+          :db/tupleAttrs :db/tupleTypes :db/tupleType}
         entities
         (reduce
          (fn [result {:keys [kind e a v]}]
@@ -155,19 +188,25 @@
      :db.type/instant (or (inst? value) (instance? js/Date value))
      :db.type/uuid (uuid? value)
      :db.type/symbol (symbol? value)
+     :db.type/fn (or (map? value) (string? value))
+     :db.type/tuple (and (vector? value) (<= 2 (count value) 8))
      false)))
 
 (defn- schema-row [row]
   {:a-edn (aget row "a_edn")
    :value-type (reader/read-string (aget row "value_type"))
    :cardinality (reader/read-string (aget row "cardinality"))
-   :unique-kind (some-> (aget row "unique_kind") reader/read-string)})
+   :unique-kind (some-> (aget row "unique_kind") reader/read-string)
+   :tuple-attrs (some-> (aget row "tuple_attrs_edn") reader/read-string)
+   :tuple-types (some-> (aget row "tuple_types_edn") reader/read-string)
+   :tuple-type (some-> (aget row "tuple_type_edn") reader/read-string)})
 
 (defn- load-schema! [db ref-name]
   (-> (invoke
        (prepared
         db
-        "SELECT a_edn, value_type, cardinality, unique_kind
+        "SELECT a_edn, value_type, cardinality, unique_kind,
+                tuple_attrs_edn, tuple_types_edn, tuple_type_edn
          FROM kotobase_schema WHERE ref_name = ?"
         [ref-name])
        "all")
@@ -178,6 +217,33 @@
                       (let [schema (schema-row row)]
                         [(:a-edn schema) schema])))
                (array-seq (aget result "results")))))))
+
+(defn requires-advanced-preparation!
+  "Return a Promise indicating whether REQUEST touches a composite tuple.
+
+  D1's zero-read fast path remains available for unrelated transactions;
+  tuple constituents use the canonical preparation path so derived tuple
+  datoms and identity upserts stay backend-independent."
+  [db ref-name request]
+  (let [requested (if (map? request) (:tx-data request) request)
+        inline-composite?
+        (boolean
+         (some #(and (map? %) (seq (:db/tupleAttrs %))) requested))
+        touched
+        (into #{}
+              (keep (fn [{:keys [a]}] (some-> a encoded)))
+              (mapcat tx-item-ops requested))]
+    (if inline-composite?
+      (js/Promise.resolve true)
+      (-> (load-schema! db ref-name)
+          (.then
+           (fn [schemas]
+             (boolean
+              (some
+               (fn [[_ definition]]
+                 (some touched
+                       (map encoded (:tuple-attrs definition))))
+               schemas))))))))
 
 (defn- current-head! [db ref-name]
   (-> (invoke
@@ -427,10 +493,12 @@
                             (when-not
                              (= (select-keys installed
                                              [:value-type :cardinality
-                                              :unique-kind])
+                                              :unique-kind :tuple-attrs
+                                              :tuple-types :tuple-type])
                                 (select-keys definition
                                              [:value-type :cardinality
-                                              :unique-kind]))
+                                              :unique-kind :tuple-attrs
+                                              :tuple-types :tuple-type]))
                               (throw
                                (ex-info "Installed Datomic schema is immutable"
                                         {:type :kotobase.datomic/schema-conflict
@@ -520,14 +588,19 @@
         guard-values (guard-params name expected)
         operations-json (json-source operations)
         history-json (json-source history)
+        outbox-edn (pr-str {:data history})
         attributes-json (json-source (vec attributes))
         schema-json
         (json-source
-         (mapv (fn [{:keys [a-edn value-type cardinality unique-kind]}]
+         (mapv (fn [{:keys [a-edn value-type cardinality unique-kind
+                            tuple-attrs tuple-types tuple-type]}]
                  {:a a-edn
                   :valueType (str value-type)
                   :cardinality (str cardinality)
-                  :uniqueKind (some-> unique-kind str)})
+                  :uniqueKind (some-> unique-kind str)
+                  :tupleAttrs (some-> tuple-attrs pr-str)
+                  :tupleTypes (some-> tuple-types pr-str)
+                  :tupleType (some-> tuple-type pr-str)})
                schema-upserts))
         unique-attributes-json (json-source (vec unique-attributes))
         now (.now js/Date)
@@ -594,15 +667,21 @@
             (str
              "INSERT INTO kotobase_schema
                 (ref_name, a_edn, value_type, cardinality, unique_kind,
-                 basis_cid)
+                 basis_cid, tuple_attrs_edn, tuple_types_edn, tuple_type_edn)
               SELECT ?, json_extract(value, '$.a'),
                      json_extract(value, '$.valueType'),
                      json_extract(value, '$.cardinality'),
-                     json_extract(value, '$.uniqueKind'), ?
+                     json_extract(value, '$.uniqueKind'), ?,
+                     json_extract(value, '$.tupleAttrs'),
+                     json_extract(value, '$.tupleTypes'),
+                     json_extract(value, '$.tupleType')
               FROM json_each(?)
               WHERE " guard-sql "
               ON CONFLICT(ref_name, a_edn) DO UPDATE SET
-                basis_cid = excluded.basis_cid")
+                basis_cid = excluded.basis_cid,
+                tuple_attrs_edn = excluded.tuple_attrs_edn,
+                tuple_types_edn = excluded.tuple_types_edn,
+                tuple_type_edn = excluded.tuple_type_edn")
             (into [name next schema-json] guard-values)))
           statements)
         statements
@@ -671,6 +750,28 @@
               AND " guard-sql "
             GROUP BY a_edn")
           stats-params))
+        outbox-statement
+        (if (nil? expected)
+          (prepared
+           db
+           (str
+            "INSERT INTO kotobase_tx_outbox
+               (ref_name, t, tx_cid, payload_edn, created_at)
+             SELECT ?, 0, ?, ?, ?
+             WHERE " guard-sql "
+             ON CONFLICT(ref_name, t) DO NOTHING")
+           (into [name next outbox-edn now] guard-values))
+          (prepared
+           db
+           (str
+            "INSERT INTO kotobase_tx_outbox
+               (ref_name, t, tx_cid, payload_edn, created_at)
+             SELECT ?, r.revision, ?, ?, ?
+             FROM kotobase_refs r
+             WHERE r.name = ? AND r.cid = ? AND " guard-sql "
+             ON CONFLICT(ref_name, t) DO NOTHING")
+           (into [name next outbox-edn now name expected] guard-values)))
+        statements (conj statements outbox-statement)
         projection-statement
         (if (nil? expected)
           (prepared
@@ -733,25 +834,41 @@
     (reader/read-string value)
     value))
 
+(defn- schema-wire-value [value]
+  (let [value
+        (if (string? value)
+          (try (reader/read-string value)
+               (catch :default _ value))
+          value)]
+    (cond
+      (keyword? value) value
+      (vector? value) (mapv schema-wire-value value)
+      :else (wire-keyword value))))
+
 (defn- schema-definitions-from-datoms [datoms]
   (let [entities
         (reduce
          (fn [result {:keys [e a v_edn]}]
            (assoc-in result [e a]
-                     (wire-keyword (reader/read-string v_edn))))
+                     (schema-wire-value (reader/read-string v_edn))))
          {}
          datoms)]
     (into
      []
      (keep
       (fn [[_ attributes]]
-        (when-let [ident (get attributes ":db/ident")]
-          (schema-definition
-           {:db/ident ident
-            :db/valueType (get attributes ":db/valueType")
-            :db/cardinality (get attributes ":db/cardinality")
-            :db/unique (get attributes ":db/unique")}))))
-     entities)))
+        (when (and (get attributes ":db/ident")
+                   (get attributes ":db/valueType"))
+          (let [ident (get attributes ":db/ident")]
+            (schema-definition
+             {:db/ident ident
+              :db/valueType (get attributes ":db/valueType")
+              :db/cardinality (get attributes ":db/cardinality")
+              :db/unique (get attributes ":db/unique")
+              :db/tupleAttrs (get attributes ":db/tupleAttrs")
+              :db/tupleTypes (get attributes ":db/tupleTypes")
+              :db/tupleType (get attributes ":db/tupleType")}))))
+      entities))))
 
 (defn rebuild-projection!
   "Atomically rebuild the current SQL projection from hydrated canonical datoms.
@@ -772,11 +889,15 @@
         row-chunks (partition-all 500 rows)
         schema-json
         (json-source
-         (mapv (fn [{:keys [a-edn value-type cardinality unique-kind]}]
+         (mapv (fn [{:keys [a-edn value-type cardinality unique-kind
+                            tuple-attrs tuple-types tuple-type]}]
                  {:a a-edn
                   :valueType (str value-type)
                   :cardinality (str cardinality)
-                  :uniqueKind (some-> unique-kind str)})
+                  :uniqueKind (some-> unique-kind str)
+                  :tupleAttrs (some-> tuple-attrs pr-str)
+                  :tupleTypes (some-> tuple-types pr-str)
+                  :tupleType (some-> tuple-type pr-str)})
                definitions))
         now (.now js/Date)
         ref-guard
@@ -825,11 +946,14 @@
             (str
              "INSERT INTO kotobase_schema
                 (ref_name, a_edn, value_type, cardinality, unique_kind,
-                 basis_cid)
+                 basis_cid, tuple_attrs_edn, tuple_types_edn, tuple_type_edn)
               SELECT ?, json_extract(value, '$.a'),
                      json_extract(value, '$.valueType'),
                      json_extract(value, '$.cardinality'),
-                     json_extract(value, '$.uniqueKind'), ?
+                     json_extract(value, '$.uniqueKind'), ?,
+                     json_extract(value, '$.tupleAttrs'),
+                     json_extract(value, '$.tupleTypes'),
+                     json_extract(value, '$.tupleType')
               FROM json_each(?)
               WHERE " ref-guard)
             [ref-name head schema-json ref-name head])))
