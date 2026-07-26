@@ -2,7 +2,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { ed25519 } from "@noble/curves/ed25519";
 import { base58btc } from "multiformats/bases/base58";
 import {
-  cacaoSiweMessage
+  cacaoSiweMessage, graphCidFromName, looksLikeGraphCid
 } from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
 import {
   headD1, transactD1, qD1, pullD1, datomsD1
@@ -236,6 +236,33 @@ function databaseRef(request) {
   return request.headers.get("x-kotobase-ref") || "";
 }
 
+// net-kotobase's own kotobase-client sends q/pull/datoms bodies keyed by a
+// pre-computed content-addressed `graph` CID -- it never sends the literal
+// db_name a ref name is derived from (a CID is a one-way hash, so it cannot
+// be reversed back into that name). `kotobase_graph_cid_index` closes that
+// gap: every successful transact records (cid-of-ref-name -> ref-name), so
+// a later request bearing only the CID resolves back to the literal ref a
+// prior transact already established. Reuses net-kotobase's own
+// graphCidFromName/looksLikeGraphCid (same kotobase-core.js import this
+// file already pulls cacaoSiweMessage from) so the CID this Worker computes
+// is byte-identical to the one net-kotobase's edge derives -- no new
+// algorithm, no duplication, no drift risk between the two.
+async function resolveRef(env, ref) {
+  if (!looksLikeGraphCid(ref)) return ref;
+  const row = await env.DB.prepare(
+    "SELECT ref_name FROM kotobase_graph_cid_index WHERE cid = ?"
+  ).bind(ref).first();
+  return row ? row.ref_name : null;
+}
+
+async function recordCidAlias(env, refName) {
+  const cid = await graphCidFromName(refName);
+  await env.DB.prepare(
+    `INSERT INTO kotobase_graph_cid_index(cid, ref_name, created_at)
+     VALUES (?, ?, ?) ON CONFLICT(cid) DO NOTHING`
+  ).bind(cid, refName, Date.now()).run();
+}
+
 async function readEdnBody(request) {
   const source = await request.text();
   if (!source || source.length > 1024 * 1024) {
@@ -244,8 +271,17 @@ async function readEdnBody(request) {
   return source;
 }
 
-async function datomicRequest(request, env, authn, action, capability, invoke) {
-  const ref = databaseRef(request);
+async function datomicRequest(
+  request, env, authn, action, capability, invoke, { recordAlias = false } = {},
+) {
+  const rawRef = databaseRef(request);
+  const ref = await resolveRef(env, rawRef);
+  if (ref === null) {
+    // A CID nothing has ever transacted into -- matches Datomic's own
+    // "never-written ref reads as empty" shape (net-kotobase's client
+    // treats a 404 here as an empty result, not an error).
+    return json({ ok: false, error: "UnknownGraphCid" }, 404);
+  }
   if (!(await authorize(authn, env, action, ref, capability))) {
     return json({ ok: false, error: "Forbidden" }, 403);
   }
@@ -254,7 +290,9 @@ async function datomicRequest(request, env, authn, action, capability, invoke) {
   }
   try {
     const source = request.method === "GET" ? null : await readEdnBody(request);
-    return edn(await invoke(env.DB, ref, source));
+    const result = await invoke(env.DB, ref, source);
+    if (recordAlias) await recordCidAlias(env, ref);
+    return edn(result);
   } catch (error) {
     console.error("Datomic request rejected", error);
     return json({ ok: false, error: "InvalidDatomicRequest" }, 400);
@@ -286,7 +324,8 @@ export default {
       if (request.method === "POST" && url.pathname === "/v1/transact") {
         return datomicRequest(
           request, env, authn, "datomic/transact", TX_CAPABILITY,
-          (db, ref, source) => transactD1(db, ref, source)
+          (db, ref, source) => transactD1(db, ref, source),
+          { recordAlias: true }
         );
       }
       if (request.method === "POST" && url.pathname === "/v1/q") {

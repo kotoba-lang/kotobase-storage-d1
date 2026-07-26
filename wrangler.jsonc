@@ -4,6 +4,21 @@
   "main": "src/worker.mjs",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
+  // Cloudflare blocks fetch() from one *.workers.dev Worker to another
+  // (error 1042) -- confirmed live 2026-07-26 when gftdcojp/net-kotobase's
+  // env.d1 (also workers.dev) tried to reach this Worker's workers.dev URL
+  // for its KOTOBASE_STORAGE_MODE=d1 bridge (ADR-2607260940). A Custom
+  // Domain is a normal HTTPS origin from Cloudflare's edge, not "another
+  // workers.dev Worker", so callers on workers.dev (or anywhere else) can
+  // reach this host. Same zone family net-kotobase's own testnet backend
+  // already uses (kotobase-cf-wasm-testnet.aozora.app) -- reuses an
+  // existing, already-provisioned zone rather than adding a new one.
+  "routes": [
+    {
+      "pattern": "kotobase-d1-verification.aozora.app",
+      "custom_domain": true
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
