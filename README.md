@@ -36,10 +36,16 @@ The Worker transports those values as EDN so keywords, symbols, sets, query
 vectors, and pull selectors are not weakened into an ad-hoc JSON query DSL:
 
 - `POST /v1/transact` — `{:tx-data [...]}`
+- `POST /v1/reindex` — `{}` (rebuild the D1 projection from canonical blocks)
 - `POST /v1/q` — `{:query [:find ...] :args [...]}`
 - `POST /v1/pull` — `{:selector [...] :eid ...}`
 - `POST /v1/datoms` — `{:index :eavt :components [...]}`
 - `GET /v1/head`
+- `GET /v1/basis` — `{:basis-cid ... :basis-t ...}`
+
+`q`, `pull`, and `datoms` accept one optional immutable database selector in
+their EDN envelope: `:as-of t`, `:since t`, or `:history true`. The Datalog
+query itself remains ordinary Datomic syntax.
 
 Every call carries the database ref in `x-kotobase-ref` and a fresh signed
 CACAO in `authorization`. Query text is data parsed by the ClojureScript EDN
@@ -88,6 +94,35 @@ Projection mutations and the mutable-ref compare-and-set are published in one
 atomic D1 `batch()`. If a database predates the projection or its head is
 stale, query/pull/datoms safely use the canonical hydrate path.
 
+`POST /v1/reindex` hydrates the canonical head and atomically replaces current
+datoms, schema, uniqueness, and attribute-statistics arrangements only if the
+ref still names that head. A concurrent transaction produces
+`:reason :head-changed` instead of publishing a mixed basis.
+
+## Datomic schema enforcement
+
+Schema entity maps use Datomic's ordinary transaction form:
+
+```clojure
+{:db/id :account/email
+ :db/ident :account/email
+ :db/valueType :db.type/string
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/identity}
+```
+
+The D1 adapter validates supported `:db/valueType` declarations before the
+canonical transaction, expands cardinality-one replacement into explicit
+retractions, and maintains a unique-value arrangement whose primary key rejects
+cross-entity collisions in the same atomic ref-CAS batch. Schema validation is
+tied to the canonical head; a concurrent schema change forces the transaction
+to retry validation.
+
+Bulk datom additions, retractions, history, and touched-attribute refreshes use
+set-based JSON/SQL statements rather than one D1 request per datom. Transactions
+against a ref with no installed schema keep a zero-lookup preparation path;
+schema-aware transactions fetch only touched cardinality/uniqueness keys.
+
 The SQL fast path currently covers positive triple-clause Datalog, scalar
 inputs, relation/scalar/collection/tuple result shapes, result maps, and
 single-variable `count`. Flat forward pull and all four current datom index
@@ -109,10 +144,11 @@ KOTOBASE_D1_URL=http://127.0.0.1:8787 npm run benchmark
 The benchmark validates every point, count, and join result before recording
 latency; it does not treat a fast error or empty response as a measurement.
 
-This is syntax-compatible rather than a claim of complete Datomic product
-compatibility. Kotobase uses CID heads instead of numeric basis-t/tx ids and
-does not implement Datomic's transactor administration, tempid allocation,
-listeners, or log API. See `docs/datomic-coverage.md` for the exact boundary.
+This is API-compatible database behavior rather than a claim that Kotobase is
+the Datomic product. Kotobase exposes a gapless chain sequence as `basis-t` and
+retains the immutable basis CID alongside it. Datomic's hosted transactor
+administration and deployment control plane remain outside this library. See
+`docs/datomic-coverage.md` for the exact boundary.
 
 The deploy shell uses the same CACAO SIWE canonicalization as
 `gftdcojp/net-kotobase`. Its authn/authz decision shapes follow

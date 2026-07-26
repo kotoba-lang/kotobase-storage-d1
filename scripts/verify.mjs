@@ -275,12 +275,148 @@ if (!result.body.startsWith(`"b`)) {
   throw new Error(`Datomic head is not a CID: ${result.body}`);
 }
 
+const schemaRef =
+  `kotobase/db/${did}/schema-${crypto.randomUUID()}`;
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [{:db/id :account/email
+            :db/ident :account/email
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one
+            :db/unique :db.unique/identity}
+           {:db/id :account/age
+            :db/ident :account/age
+            :db/valueType :db.type/long
+            :db/cardinality :db.cardinality/one}
+           {:db/id "account-1"
+            :account/email "alice@example.test"
+            :account/age 42}]}`
+});
+check("Datomic schema installation", result.status, 200, result.body);
+
+result = await call("/v1/basis", {
+  auth: cacao(read), ref: schemaRef
+});
+check("Datomic immutable basis", result.status, 200, result.body);
+const basisMatch = result.body.match(/:basis-t\s+(\d+)/);
+if (!basisMatch) {
+  throw new Error(`Datomic basis report mismatch: ${result.body}`);
+}
+const schemaBasisT = Number(basisMatch[1]);
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [[:db/add "account-1" :account/email "new@example.test"]]}`
+});
+check("cardinality-one replacement", result.status, 200, result.body);
+
+result = await call("/v1/q", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:query
+          [:find [?email ...]
+           :where ["account-1" :account/email ?email]]}`
+});
+check("cardinality-one query", result.status, 200, result.body);
+check("cardinality-one keeps only latest value",
+      result.body, `["new@example.test"]`);
+
+result = await call("/v1/q", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:as-of ${schemaBasisT}
+          :query
+          [:find ?email .
+           :where ["account-1" :account/email ?email]]}`
+});
+check("as-of query", result.status, 200, result.body);
+check("as-of preserves immutable basis",
+      result.body, `"alice@example.test"`);
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [{:db/id -1
+            :account/email "new@example.test"
+            :account/age 43}]}`
+});
+check("identity upsert through tempid", result.status, 200, result.body);
+if (!result.body.includes(`:tempids {-1 "account-1"}`)) {
+  throw new Error(`Datomic identity tempid report mismatch: ${result.body}`);
+}
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [[:db.fn/cas
+            [:account/email "new@example.test"]
+            :account/age 43 44]]}`
+});
+check("lookup-ref transaction function", result.status, 200, result.body);
+
+result = await call("/v1/q", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:since ${schemaBasisT}
+          :query
+          [:find ?age .
+           :where ["account-1" :account/age ?age]]}`
+});
+check("since query", result.status, 200, result.body);
+check("since returns latest changed value", result.body, `"44"`);
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data
+          [{:db/id "account-2"
+            :account/email "new@example.test"}]}`
+});
+check("unique value rejected", result.status, 400, result.body);
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{:tx-data [[:db/add "account-1" :account/age "forty-two"]]}`
+});
+check("value type rejected", result.status, 400, result.body);
+
+result = await call("/v1/datoms", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:history true
+          :index :eavt
+          :components ["account-1" :account/email]}`
+});
+check("history datoms", result.status, 200, result.body);
+if (!result.body.includes(`:added false`) ||
+    !result.body.includes(`alice@example.test`) ||
+    !result.body.includes(`new@example.test`)) {
+  throw new Error(`Datomic history event log mismatch: ${result.body}`);
+}
+
+result = await call("/v1/reindex", {
+  method: "POST", auth: cacao(tx), ref: schemaRef,
+  body: `{}`
+});
+check("explicit canonical reindex", result.status, 200, result.body);
+if (!result.body.includes(`:reindexed? true`)) {
+  throw new Error(`Datomic reindex report mismatch: ${result.body}`);
+}
+
+result = await call("/v1/q", {
+  method: "POST", auth: cacao(read), ref: schemaRef,
+  body: `{:query
+          [:find ?e .
+           :where [?e :account/email "new@example.test"]]}`
+});
+check("query after reindex", result.status, 200, result.body);
+check("reindex preserves current basis", result.body, `"account-1"`);
+
 console.log(JSON.stringify({
   ok: true,
   endpoint,
   principal: did,
   ref,
-  datomicRef
+  datomicRef,
+  schemaRef
 }, null, 2));
 
 function percentile(values, fraction) {
