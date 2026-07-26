@@ -1,0 +1,18 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "shadow-cljs release engine",
+    "check": "shadow-cljs compile engine",
+    "deploy": "npm run build && wrangler deploy",
+    "dev": "npm run build && wrangler dev",
+    "migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "verify:remote": "node scripts/verify.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.114.0",
+    "shadow-cljs": "3.4.11",
+    "@ipld/dag-cbor": "^9.2.1",
+    "@noble/curves": "^1.7.0",
+    "multiformats": "^13.3.1"
+  }
+}

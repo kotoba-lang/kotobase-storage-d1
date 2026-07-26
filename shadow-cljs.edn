@@ -1,0 +1,17 @@
+{:deps true
+ :builds
+ {:engine
+  {:target :esm
+   :output-dir "dist"
+   :modules
+   {:kotobase-engine
+    {:entries [kotobase.storage.d1-worker]
+     :exports
+     {headD1 kotobase.storage.d1-worker/head-edn!
+      transactD1 kotobase.storage.d1-worker/transact-edn!
+      qD1 kotobase.storage.d1-worker/q-edn!
+      pullD1 kotobase.storage.d1-worker/pull-edn!
+      datomsD1 kotobase.storage.d1-worker/datoms-edn!}}}
+   :compiler-options {:optimizations :advanced
+                      :source-map false}}}}
+

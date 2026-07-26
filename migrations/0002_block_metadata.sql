@@ -1,0 +1,5 @@
+ALTER TABLE kotobase_blocks
+  ADD COLUMN byte_length INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE kotobase_blocks
+  ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;

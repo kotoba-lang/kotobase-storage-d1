@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kotobase-d1-auth-verification",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-07-26",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kotobase-d1-verification",
+      "database_id": "6f42fbb0-20ee-4187-9435-bd71b4e264bb",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,7 @@
+{:paths ["src-cljs"]
+ :deps {thheller/shadow-cljs {:mvn/version "3.4.11"}
+        org.clojure/clojurescript {:mvn/version "1.12.145"}
+        io.github.kotoba-lang/kotobase-storage
+        {:local/root "../kotobase-storage"}
+        io.github.kotoba-lang/kotobase-engine
+        {:local/root "../kotobase-engine"}}}
