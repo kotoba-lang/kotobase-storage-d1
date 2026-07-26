@@ -46,6 +46,18 @@ CACAO in `authorization`. Query text is data parsed by the ClojureScript EDN
 reader; it is never evaluated as code. Predicate/function clauses use the
 engine's fixed whitelist.
 
+`x-kotobase-ref` accepts either the literal ref name
+(`kotobase/db/<tenant_did>/<db_name>`) or its content-addressed CID
+(`graphCidFromName` from `gftdcojp/net-kotobase`'s `kotobase.graph`,
+identical to net-kotobase's own edge derivation). A successful `/v1/transact`
+records `(cid, ref_name)` into `kotobase_graph_cid_index`, so a later
+`q`/`pull`/`datoms`/`head` call bearing only the CID resolves back to the ref
+name a prior transact already established — a CID nothing has ever
+transacted into 404s as `UnknownGraphCid` rather than being treated as a
+fresh/empty graph. This exists because net-kotobase's own client only ever
+sends the CID for reads (never the literal name); see
+`gftdcojp/net-kotobase`'s ADR-2607260940.
+
 Verified boundaries:
 
 - generic signed Ed25519 `did:key` CACAO authentication;
