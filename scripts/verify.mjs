@@ -6,7 +6,7 @@ import {
 } from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
 
 const endpoint = process.env.KOTOBASE_D1_URL ||
-  "https://kotobase-d1-auth-verification.04-feasts-minded.workers.dev";
+  "https://kotobase-storage-d1.aozora.app";
 const encoder = new TextEncoder();
 const secret = ed25519.utils.randomSecretKey();
 const pub = ed25519.getPublicKey(secret);
