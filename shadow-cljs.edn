@@ -13,6 +13,8 @@
       reindexD1 kotobase.storage.d1-worker/reindex-edn!
       qD1 kotobase.storage.d1-worker/q-edn!
       pullD1 kotobase.storage.d1-worker/pull-edn!
-      datomsD1 kotobase.storage.d1-worker/datoms-edn!}}}
+      datomsD1 kotobase.storage.d1-worker/datoms-edn!
+      foldD1 kotobase.storage.d1-worker/fold-edn!
+      viewD1 kotobase.storage.d1-worker/view-edn!}}}
    :compiler-options {:optimizations :advanced
                       :source-map false}}}}

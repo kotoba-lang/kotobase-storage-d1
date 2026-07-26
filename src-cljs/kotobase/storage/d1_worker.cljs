@@ -252,6 +252,14 @@
                (edn-promise
                 (d/datoms canonical datom-options)))))))))
 
+(defn ^:export fold-edn! [db ref-name source]
+  (let [opts (read-edn source)]
+    (edn-promise (d/fold (database db ref-name) opts))))
+
+(defn ^:export view-edn! [db ref-name source]
+  (let [{:keys [view]} (read-edn source)]
+    (edn-promise (d/view (database db ref-name) view))))
+
 (defn ^:export basis-edn! [db ref-name _source]
   (let [snapshot (d/db (database db ref-name))]
     (-> (js/Promise.all
