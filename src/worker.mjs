@@ -237,6 +237,183 @@ function databaseRef(request) {
   return request.headers.get("x-kotobase-ref") || "";
 }
 
+function base64url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function sessionDigest(token) {
+  const digest = await crypto.subtle.digest("SHA-256", textEncoder.encode(token));
+  return base64url(new Uint8Array(digest));
+}
+
+function ednString(value) {
+  return JSON.stringify(value);
+}
+
+function readEdnScalar(value) {
+  if (value === null || value === undefined || value === "nil") return null;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+$/.test(value)) return Number(value);
+  if (value.startsWith("\"")) return JSON.parse(value);
+  if (value.startsWith(":")) return value.slice(1);
+  return value;
+}
+
+async function entityFacts(db, ref, entityEdn) {
+  const result = await db.prepare(
+    `SELECT a_edn, v_edn
+       FROM kotobase_datoms_current
+      WHERE ref_name = ? AND e_edn = ?`
+  ).bind(ref, entityEdn).all();
+  const facts = {};
+  for (const row of result.results || []) {
+    const attribute = readEdnScalar(row.a_edn);
+    const key = attribute.startsWith(":") ? attribute.slice(1) : attribute;
+    const value = readEdnScalar(row.v_edn);
+    if (Object.prototype.hasOwnProperty.call(facts, key)) {
+      facts[key] = Array.isArray(facts[key]) ?
+        [...facts[key], value] : [facts[key], value];
+    } else {
+      facts[key] = value;
+    }
+  }
+  return facts;
+}
+
+async function resolveOpaqueSession(request, env) {
+  const id = requestId(request);
+  const ref = databaseRef(request);
+  const authorization = request.headers.get("authorization") || "";
+  const match = authorization.match(/^Bearer\s+(\S+)$/i);
+  if (!ref.startsWith("kotobase/db/") || !match || match[1].length > 4096) {
+    await recordDecision(env, {
+      requestId: id, kind: "authn", decision: "challenge",
+      reason: "missing-session"
+    });
+    return json({ ok: false, error: "Unauthenticated" }, 401);
+  }
+
+  const basis = await env.DB.prepare(
+    `SELECT r.cid AS canonical_head, p.head_cid AS projection_head
+       FROM kotobase_refs r
+       LEFT JOIN kotobase_projection p ON p.ref_name = r.name
+      WHERE r.name = ?`
+  ).bind(ref).first();
+  if (!basis) return json({ ok: false, error: "Unauthenticated" }, 401);
+  if (!basis.projection_head || basis.projection_head !== basis.canonical_head) {
+    return json({ ok: false, error: "AuthenticationProjectionUnavailable" }, 503);
+  }
+
+  const digest = await sessionDigest(match[1]);
+  const sessionIdentity = await env.DB.prepare(
+    `SELECT e_edn
+       FROM kotobase_datoms_current
+      WHERE ref_name = ? AND a_edn IN (?, ?) AND v_edn = ?
+      LIMIT 1`
+  ).bind(
+    ref,
+    ":identity.session/token-digest",
+    ednString(":identity.session/token-digest"),
+    ednString(digest)
+  ).first();
+  if (!sessionIdentity) {
+    await recordDecision(env, {
+      requestId: id, kind: "authn", decision: "challenge",
+      reason: "unknown-session"
+    });
+    return json({ ok: false, error: "Unauthenticated" }, 401);
+  }
+
+  const session = await entityFacts(env.DB, ref, sessionIdentity.e_edn);
+  const userEdn = ednString(session["identity.session/user"]);
+  const tenantEdn = ednString(session["identity.session/tenant"]);
+  const user = await entityFacts(env.DB, ref, userEdn);
+  const tenant = await entityFacts(env.DB, ref, tenantEdn);
+  const membershipEntity = await env.DB.prepare(
+    `SELECT u.e_edn
+       FROM kotobase_datoms_current u
+       JOIN kotobase_datoms_current t
+         ON t.ref_name = u.ref_name AND t.e_edn = u.e_edn
+      WHERE u.ref_name = ?
+        AND u.a_edn IN (?, ?) AND u.v_edn = ?
+        AND t.a_edn IN (?, ?) AND t.v_edn = ?
+      LIMIT 1`
+  ).bind(
+    ref,
+    ":identity.membership/user",
+    ednString(":identity.membership/user"),
+    userEdn,
+    ":identity.membership/tenant",
+    ednString(":identity.membership/tenant"),
+    tenantEdn
+  ).first();
+  const membership = membershipEntity ?
+    await entityFacts(env.DB, ref, membershipEntity.e_edn) : null;
+  const now = Date.now();
+  const active = [false, "false"].includes(session["identity.session/revoked?"]) &&
+    Number(session["identity.session/expires-at"]) > now &&
+    ["active", ":active"].includes(user["identity.user/status"]) &&
+    membership;
+  const requestedTenant = request.headers.get("x-gftd-org-id");
+  const requestedApplication = request.headers.get("x-kotobase-application");
+  const tenantId = tenant["identity.tenant/id"];
+  const sessionApplication = session["identity.session/application"];
+  if (!active || (requestedTenant && requestedTenant !== tenantId)) {
+    await recordDecision(env, {
+      requestId: id, principal: user["identity.user/id"] || null,
+      kind: requestedTenant && requestedTenant !== tenantId ? "authz" : "authn",
+      decision: requestedTenant && requestedTenant !== tenantId ? "deny" : "challenge",
+      reason: requestedTenant && requestedTenant !== tenantId ?
+        "tenant-scope-mismatch" : "inactive-session"
+    });
+    return json({
+      ok: false,
+      error: requestedTenant && requestedTenant !== tenantId ?
+        "Forbidden" : "Unauthenticated"
+    }, requestedTenant && requestedTenant !== tenantId ? 403 : 401);
+  }
+  if (!requestedApplication || requestedApplication !== sessionApplication) {
+    await recordDecision(env, {
+      requestId: id, principal: user["identity.user/id"] || null,
+      kind: "authz", decision: "deny", reason: "application-audience-mismatch",
+      resource: requestedApplication || null
+    });
+    return json({ ok: false, error: "Forbidden" }, 403);
+  }
+
+  const permissionsValue = membership["identity.membership/permissions"];
+  const permissions = permissionsValue === undefined ? [] :
+    (Array.isArray(permissionsValue) ? permissionsValue : [permissionsValue]);
+  const sessionId = session["identity.session/id"];
+  const userId = user["identity.user/id"];
+  await recordDecision(env, {
+    requestId: id, principal: userId, kind: "authn",
+    decision: "authenticated", reason: "active-datomic-session"
+  });
+  return json({
+    ok: true,
+    context: {
+      claims: {
+        userId,
+        sessionId,
+        orgId: tenantId,
+        orgRole: String(membership["identity.membership/role"] || "")
+          .replace(/^:/, ""),
+        orgPermissions: permissions,
+        issuedAtMs: Number(session["identity.session/created-at"]),
+        expiresAtMs: Number(session["identity.session/expires-at"]),
+        issuer: "kotobase-storage-d1",
+        authorizedParties: [sessionApplication]
+      },
+      targetOrgId: tenantId,
+      requestId: id
+    }
+  });
+}
+
 // net-kotobase's own kotobase-client sends q/pull/datoms bodies keyed by a
 // pre-computed content-addressed `graph` CID -- it never sends the literal
 // db_name a ref name is derived from (a CID is a one-way hash, so it cannot
@@ -312,6 +489,9 @@ export default {
           authn: "kotoba-lang/authentication:cacao",
           authz: "kotoba-lang/authorization:deny-by-default"
         });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/session") {
+        return resolveOpaqueSession(request, env);
       }
 
       const authn = await authenticate(request, env);
