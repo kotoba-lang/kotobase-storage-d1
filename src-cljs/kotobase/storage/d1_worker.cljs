@@ -166,37 +166,97 @@
   (edn-promise (engine/head (database db ref-name))))
 
 (defn ^:export transact-edn! [db ref-name source]
-  (let [request (read-edn source)
-        plan (projection/transaction-plan request)]
-    (edn-promise
-     (d/transact (database db ref-name plan) request))))
+  (let [request (read-edn source)]
+    (-> (if (d/advanced-transaction? request)
+          (d/prepare-transaction (database db ref-name) request)
+          (js/Promise.resolve
+           (d/prepare-basic-transaction request)))
+        (.then
+         (fn [prepared]
+           (-> (projection/prepare-transaction!
+                db ref-name (:request prepared))
+               (.then
+                (fn [{projected-request :request plan :plan}]
+                  {:prepared (assoc prepared :request projected-request)
+                   :plan plan})))))
+        (.then
+         (fn [{:keys [prepared plan]}]
+           (d/transact-prepared (database db ref-name plan) prepared)))
+        (.then pr-str))))
+
+(defn ^:export reindex-edn! [db ref-name _source]
+  (let [canonical (database db ref-name)]
+    (-> (engine/head canonical)
+        (.then
+         (fn [head]
+           (when-not head
+             (throw (ex-info "Cannot reindex a missing database ref"
+                             {:type :kotobase.datomic/missing-ref
+                              :ref ref-name})))
+           (-> (d/datoms canonical {:index :eavt})
+               (.then
+                (fn [datoms]
+                  (projection/rebuild-projection!
+                   db ref-name head datoms))))))
+        (.then pr-str))))
 
 (defn ^:export q-edn! [db ref-name source]
-  (let [{:keys [query args]} (read-edn source)]
-    (-> (projection/fast-q! db ref-name query (or args []))
-        (.then
-         (fn [{:keys [used? value]}]
-           (if used?
-             (pr-str value)
-             (edn-promise
-              (apply d/q query (database db ref-name) (or args [])))))))))
+  (let [{:keys [query args as-of since history]} (read-edn source)
+        canonical (database db ref-name)]
+    (if (or (some? as-of) (some? since) history)
+      (let [view (cond
+                   (some? as-of) (d/as-of (d/db canonical) as-of)
+                   (some? since) (d/since (d/db canonical) since)
+                   history (d/history (d/db canonical)))]
+        (edn-promise (apply d/q query view (or args []))))
+      (-> (projection/fast-q! db ref-name query (or args []))
+          (.then
+           (fn [{:keys [used? value]}]
+             (if used?
+               (pr-str value)
+               (edn-promise
+                (apply d/q query canonical (or args []))))))))))
 
 (defn ^:export pull-edn! [db ref-name source]
-  (let [{:keys [selector eid]} (read-edn source)]
-    (-> (projection/fast-pull! db ref-name selector eid)
-        (.then
-         (fn [{:keys [used? value]}]
-           (if used?
-             (pr-str value)
-             (edn-promise
-              (d/pull (database db ref-name) selector eid))))))))
+  (let [{:keys [selector eid as-of since history]} (read-edn source)
+        canonical (database db ref-name)]
+    (if (or (some? as-of) (some? since) history)
+      (let [view (cond
+                   (some? as-of) (d/as-of (d/db canonical) as-of)
+                   (some? since) (d/since (d/db canonical) since)
+                   history (d/history (d/db canonical)))]
+        (edn-promise (d/pull view selector eid)))
+      (-> (projection/fast-pull! db ref-name selector eid)
+          (.then
+           (fn [{:keys [used? value]}]
+             (if used?
+               (pr-str value)
+               (edn-promise
+                (d/pull canonical selector eid)))))))))
 
 (defn ^:export datoms-edn! [db ref-name source]
-  (let [options (read-edn source)]
-    (-> (projection/fast-datoms! db ref-name options)
+  (let [{:keys [as-of since history] :as options} (read-edn source)
+        datom-options (dissoc options :as-of :since :history)
+        canonical (database db ref-name)]
+    (if (or (some? as-of) (some? since) history)
+      (let [view (cond
+                   (some? as-of) (d/as-of (d/db canonical) as-of)
+                   (some? since) (d/since (d/db canonical) since)
+                   history (d/history (d/db canonical)))]
+        (edn-promise (d/datoms view datom-options)))
+      (-> (projection/fast-datoms! db ref-name datom-options)
+          (.then
+           (fn [{:keys [used? value]}]
+             (if used?
+               (pr-str value)
+               (edn-promise
+                (d/datoms canonical datom-options)))))))))
+
+(defn ^:export basis-edn! [db ref-name _source]
+  (let [snapshot (d/db (database db ref-name))]
+    (-> (js/Promise.all
+         #js [(d/basis-cid snapshot) (d/basis-t snapshot)])
         (.then
-         (fn [{:keys [used? value]}]
-           (if used?
-             (pr-str value)
-             (edn-promise
-              (d/datoms (database db ref-name) options))))))))
+         (fn [results]
+           (pr-str {:basis-cid (aget results 0)
+                    :basis-t (aget results 1)}))))))

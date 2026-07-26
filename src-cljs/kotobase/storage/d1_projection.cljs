@@ -39,6 +39,15 @@
 (defn- encoded [value]
   (pr-str (wire-value value)))
 
+(defn- encoded-value
+  "Encode the value as kotobase-peer stores it today.
+
+  The peer validates typed values before persistence, then preserves its
+  established string-valued arrangement format. Keeping the projection in
+  that same representation makes reindex and fallback queries identical."
+  [value]
+  (encoded (if (string? value) value (str value))))
+
 (defn- reverse-attribute [attribute]
   (when (and (keyword? attribute) (.startsWith (name attribute) "_"))
     (keyword (namespace attribute) (subs (name attribute) 1))))
@@ -77,6 +86,359 @@
 
     :else []))
 
+(def ^:private supported-value-types
+  #{:db.type/string :db.type/boolean :db.type/long :db.type/double
+    :db.type/keyword :db.type/ref :db.type/instant :db.type/uuid
+    :db.type/symbol})
+
+(declare transaction-plan json-source)
+
+(defn- schema-definition [entity]
+  (when (and (map? entity) (contains? entity :db/ident))
+    (let [attribute (:db/ident entity)
+          value-type (:db/valueType entity)
+          cardinality (:db/cardinality entity)
+          unique-kind (:db/unique entity)]
+      (when-not (keyword? attribute)
+        (throw (ex-info "Schema :db/ident must be a keyword"
+                        {:type :kotobase.datomic/invalid-schema
+                         :attribute attribute})))
+      (when-not (contains? supported-value-types value-type)
+        (throw (ex-info "Unsupported Datomic :db/valueType"
+                        {:type :kotobase.datomic/invalid-schema
+                         :attribute attribute
+                         :value-type value-type})))
+      (when-not (contains? #{:db.cardinality/one :db.cardinality/many}
+                           cardinality)
+        (throw (ex-info "Invalid Datomic :db/cardinality"
+                        {:type :kotobase.datomic/invalid-schema
+                         :attribute attribute
+                         :cardinality cardinality})))
+      (when-not (or (nil? unique-kind)
+                    (contains? #{:db.unique/identity :db.unique/value}
+                               unique-kind))
+        (throw (ex-info "Invalid Datomic :db/unique"
+                        {:type :kotobase.datomic/invalid-schema
+                         :attribute attribute
+                         :unique unique-kind})))
+      {:a attribute
+       :a-edn (encoded attribute)
+       :value-type value-type
+       :cardinality cardinality
+       :unique-kind unique-kind})))
+
+(defn- transaction-schema-definitions [request]
+  (let [requested (if (map? request) (:tx-data request) request)
+        schema-attributes
+        #{:db/ident :db/valueType :db/cardinality :db/unique}
+        entities
+        (reduce
+         (fn [result {:keys [kind e a v]}]
+           (if (and (= :add kind) (contains? schema-attributes a))
+             (assoc-in result [e a] v)
+             result))
+         {}
+         (mapcat tx-item-ops requested))]
+    (vec (keep (comp schema-definition val) entities))))
+
+(defn- value-type? [value-type value]
+  (and
+   (some? value)
+   (case value-type
+     :db.type/string (string? value)
+     :db.type/boolean (boolean? value)
+     :db.type/long (and (number? value) (js/Number.isSafeInteger value))
+     :db.type/double (number? value)
+     :db.type/keyword (keyword? value)
+     :db.type/ref (or (string? value) (keyword? value)
+                      (and (number? value) (js/Number.isSafeInteger value)))
+     :db.type/instant (or (inst? value) (instance? js/Date value))
+     :db.type/uuid (uuid? value)
+     :db.type/symbol (symbol? value)
+     false)))
+
+(defn- schema-row [row]
+  {:a-edn (aget row "a_edn")
+   :value-type (reader/read-string (aget row "value_type"))
+   :cardinality (reader/read-string (aget row "cardinality"))
+   :unique-kind (some-> (aget row "unique_kind") reader/read-string)})
+
+(defn- load-schema! [db ref-name]
+  (-> (invoke
+       (prepared
+        db
+        "SELECT a_edn, value_type, cardinality, unique_kind
+         FROM kotobase_schema WHERE ref_name = ?"
+        [ref-name])
+       "all")
+      (.then
+       (fn [result]
+         (into {}
+               (map (fn [row]
+                      (let [schema (schema-row row)]
+                        [(:a-edn schema) schema])))
+               (array-seq (aget result "results")))))))
+
+(defn- current-head! [db ref-name]
+  (-> (invoke
+       (prepared
+        db
+        "SELECT r.cid,
+                CASE WHEN p.head_cid = r.cid THEN 1 ELSE 0 END AS projected
+         FROM kotobase_refs r
+         LEFT JOIN kotobase_projection p ON p.ref_name = r.name
+         WHERE r.name = ?"
+        [ref-name])
+       "first")
+      (.then
+       (fn [row]
+         {:head (some-> row (aget "cid"))
+          :projected? (and row (= 1 (aget row "projected")))}))))
+
+(defn- selected-current-datoms!
+  [db ref-name pair-keys unique-keys schema-attributes]
+  (let [pair-json (json-source pair-keys)
+        unique-json (json-source unique-keys)
+        schema-json (json-source schema-attributes)]
+    (-> (invoke
+         (prepared
+          db
+          "SELECT e_edn, a_edn, v_edn
+           FROM kotobase_datoms_current d
+           WHERE d.ref_name = ?
+             AND (
+               EXISTS (
+                 SELECT 1 FROM json_each(?) x
+                 WHERE json_extract(x.value, '$.e') = d.e_edn
+                   AND json_extract(x.value, '$.a') = d.a_edn)
+               OR EXISTS (
+                 SELECT 1 FROM json_each(?) x
+                 WHERE json_extract(x.value, '$.a') = d.a_edn
+                   AND json_extract(x.value, '$.v') = d.v_edn)
+               OR d.a_edn IN (SELECT value FROM json_each(?))
+             )"
+          [ref-name pair-json unique-json schema-json])
+         "all")
+        (.then
+         (fn [result]
+           (mapv
+            (fn [row]
+              {:e (aget row "e_edn")
+               :a (aget row "a_edn")
+               :v (aget row "v_edn")})
+            (array-seq (aget result "results"))))))))
+
+(defn- validate-schema-install! [definition rows]
+  (let [attribute (:a-edn definition)
+        matching (filter #(= attribute (:a %)) rows)]
+    ;; kotobase-peer's established arrangement stores non-ref values as
+    ;; strings after validating their original type. Historical datoms
+    ;; therefore cannot prove whether "42" originated as a long or a string.
+    ;; Enforce valueType on every new write; validate only the recoverable
+    ;; cardinality/uniqueness invariants during install/reindex.
+    (when (= :db.cardinality/one (:cardinality definition))
+      (when (some (fn [[_ values]] (> (count values) 1))
+                  (group-by :e matching))
+        (throw (ex-info "Existing values violate :db.cardinality/one"
+                        {:type :kotobase.datomic/schema-conflict
+                         :attribute (:a definition)}))))
+    (when (:unique-kind definition)
+      (when (some (fn [[_ values]]
+                    (> (count (into #{} (map :e) values)) 1))
+                  (group-by :v matching))
+        (throw (ex-info "Existing values violate :db/unique"
+                        {:type :kotobase.datomic/schema-conflict
+                         :attribute (:a definition)}))))))
+
+(defn- enrich-transaction
+  [request schemas current-rows definitions validated-head]
+  (let [requested (if (map? request) (:tx-data request) request)
+        operations (vec (mapcat tx-item-ops requested))
+        current-by-pair
+        (reduce (fn [result {:keys [e a v]}]
+                  (update result [e a] (fnil conj #{}) v))
+                {}
+                current-rows)
+        current-unique
+        (reduce (fn [result {:keys [e a v]}]
+                  (assoc result [a v] e))
+                {}
+                current-rows)
+        state
+        (reduce
+         (fn [{:keys [tx-data pair-values unique-values]} operation]
+           (let [{:keys [kind e a v]} operation
+                 e-edn (encoded e)
+                 a-edn (when a (encoded a))
+                 v-edn (when (some? v) (encoded-value v))
+                 schema (get schemas a-edn)]
+             (when (and (= :add kind) schema
+                        (not (value-type? (:value-type schema) v)))
+               (throw (ex-info "Value violates Datomic :db/valueType"
+                               {:type :kotobase.datomic/value-type
+                                :entity e
+                                :attribute a
+                                :value v
+                                :value-type (:value-type schema)})))
+             (case kind
+               :retract-entity
+               {:tx-data (conj tx-data [:db/retractEntity e])
+                :pair-values
+                (into {}
+                      (remove (fn [[[candidate _] _]]
+                                (= candidate e-edn)))
+                      pair-values)
+                :unique-values
+                (into {}
+                      (remove (fn [[_ owner]] (= owner e-edn)))
+                      unique-values)}
+
+               :retract
+               {:tx-data (conj tx-data [:db/retract e a v])
+                :pair-values (update pair-values [e-edn a-edn] disj v-edn)
+                :unique-values (if (= e-edn (get unique-values [a-edn v-edn]))
+                                 (dissoc unique-values [a-edn v-edn])
+                                 unique-values)}
+
+               :add
+               (let [one? (= :db.cardinality/one (:cardinality schema))
+                     old-values (if one?
+                                  (get pair-values [e-edn a-edn] #{})
+                                  #{})
+                     replacements (remove #{v-edn} old-values)
+                     tx-data
+                     (into tx-data
+                           (map (fn [old]
+                                  [:db/retract e a (reader/read-string old)]))
+                           replacements)
+                     owner (when (:unique-kind schema)
+                             (get unique-values [a-edn v-edn]))]
+                 (when (and owner (not= owner e-edn))
+                   (throw (ex-info "Value violates Datomic :db/unique"
+                                   {:type :kotobase.datomic/unique-conflict
+                                    :entity e
+                                    :attribute a
+                                    :value v})))
+                 {:tx-data (conj tx-data [:db/add e a v])
+                  :pair-values
+                  (assoc pair-values [e-edn a-edn]
+                         (if one?
+                           #{v-edn}
+                           (conj (get pair-values [e-edn a-edn] #{}) v-edn)))
+                  :unique-values
+                  (if (:unique-kind schema)
+                    (assoc unique-values [a-edn v-edn] e-edn)
+                    unique-values)})
+
+               {:tx-data tx-data
+                :pair-values pair-values
+                :unique-values unique-values})))
+         {:tx-data []
+          :pair-values current-by-pair
+          :unique-values current-unique}
+         operations)
+        enriched-request
+        (if (map? request)
+          (assoc request :tx-data (:tx-data state))
+          (:tx-data state))]
+    {:request enriched-request
+     :plan (assoc (transaction-plan enriched-request)
+                  :validated-head validated-head
+                  :schema-upserts definitions
+                  :unique-attributes
+                  (into
+                   (into #{} (keep (fn [definition]
+                                     (when (:unique-kind definition)
+                                       (:a-edn definition))))
+                         definitions)
+                   (keep
+                    (fn [{:keys [a]}]
+                      (let [a-edn (some-> a encoded)]
+                        (when (:unique-kind (get schemas a-edn))
+                          a-edn))))
+                   (mapcat tx-item-ops
+                           (if (map? request) (:tx-data request) request))))}))
+
+(defn prepare-transaction!
+  "Validate and normalize a transaction against the current schema projection.
+
+  Cardinality-one adds are expanded with the canonical retractions required to
+  keep the immutable block chain and SQL projection byte-for-byte equivalent."
+  [db ref-name request]
+  (let [definitions (transaction-schema-definitions request)]
+    (-> (js/Promise.all
+         #js [(current-head! db ref-name)
+              (load-schema! db ref-name)])
+        (.then
+         (fn [results]
+           (let [{:keys [head projected?]} (aget results 0)
+                 existing (aget results 1)
+                 definitions-by-attribute
+                 (into {} (map (juxt :a-edn identity)) definitions)
+                 schemas (merge existing definitions-by-attribute)]
+             (when (and head (seq existing) (not projected?))
+               (throw
+                (ex-info "Schema projection is stale; run /v1/reindex"
+                         {:type :kotobase.datomic/reindex-required
+                          :ref ref-name
+                          :head head})))
+             (if (empty? schemas)
+               ;; Preserve the established schemaless bulk path: no current
+               ;; datom lookup, no second operation normalization pass.
+               {:request request
+                :plan (assoc (transaction-plan request)
+                             :validated-head head
+                             :schema-upserts []
+                             :unique-attributes #{})}
+               (let [operations
+                     (vec
+                      (mapcat tx-item-ops
+                              (if (map? request) (:tx-data request) request)))
+                     schema-ops
+                     (filter #(get schemas (some-> (:a %) encoded)) operations)
+                     pair-keys
+                     (into []
+                           (keep
+                            (fn [{:keys [e a]}]
+                              (let [a-edn (encoded a)
+                                    schema (get schemas a-edn)]
+                                (when (= :db.cardinality/one
+                                         (:cardinality schema))
+                                  {:e (encoded e) :a a-edn}))))
+                           schema-ops)
+                     unique-keys
+                     (into []
+                           (keep
+                            (fn [{:keys [a v kind]}]
+                              (let [a-edn (encoded a)
+                                    schema (get schemas a-edn)]
+                                (when (and (= :add kind)
+                                           (:unique-kind schema))
+                                  {:a a-edn :v (encoded-value v)}))))
+                           schema-ops)
+                     schema-attributes (mapv :a-edn definitions)]
+                 (-> (selected-current-datoms!
+                      db ref-name pair-keys unique-keys schema-attributes)
+                     (.then
+                      (fn [rows]
+                        (doseq [definition definitions]
+                          (when-let [installed
+                                     (get existing (:a-edn definition))]
+                            (when-not
+                             (= (select-keys installed
+                                             [:value-type :cardinality
+                                              :unique-kind])
+                                (select-keys definition
+                                             [:value-type :cardinality
+                                              :unique-kind]))
+                              (throw
+                               (ex-info "Installed Datomic schema is immutable"
+                                        {:type :kotobase.datomic/schema-conflict
+                                         :attribute (:a definition)}))))
+                          (validate-schema-install! definition rows))
+                        (enrich-transaction request schemas rows definitions
+                                            head))))))))))))
+
 (defn- remove-entity-exact [exact entity]
   (into {}
         (remove (fn [[[candidate _ _] _]] (= candidate entity)))
@@ -103,7 +465,7 @@
 
                (:add :retract)
                (let [a (encoded a)
-                     v (encoded v)]
+                     v (encoded-value v)]
                  (assoc state :exact
                         (assoc exact [e a v]
                                {:kind kind :e e :a a :v v})))
@@ -151,12 +513,23 @@
     [name expected name expected]))
 
 (defn- projection-statements
-  [db name expected next {:keys [operations history recompute-all? attributes]}]
+  [db name expected next
+   {:keys [operations history recompute-all? attributes schema-upserts
+           unique-attributes]}]
   (let [{guard-sql :sql} (guard expected)
         guard-values (guard-params name expected)
         operations-json (json-source operations)
         history-json (json-source history)
         attributes-json (json-source (vec attributes))
+        schema-json
+        (json-source
+         (mapv (fn [{:keys [a-edn value-type cardinality unique-kind]}]
+                 {:a a-edn
+                  :valueType (str value-type)
+                  :cardinality (str cardinality)
+                  :uniqueKind (some-> unique-kind str)})
+               schema-upserts))
+        unique-attributes-json (json-source (vec unique-attributes))
         now (.now js/Date)
         statements
         [(prepared
@@ -212,6 +585,53 @@
             FROM json_each(?)
             WHERE " guard-sql)
           (into [name next history-json] guard-values))]
+        statements
+        (if (seq schema-upserts)
+          (conj
+           statements
+           (prepared
+            db
+            (str
+             "INSERT INTO kotobase_schema
+                (ref_name, a_edn, value_type, cardinality, unique_kind,
+                 basis_cid)
+              SELECT ?, json_extract(value, '$.a'),
+                     json_extract(value, '$.valueType'),
+                     json_extract(value, '$.cardinality'),
+                     json_extract(value, '$.uniqueKind'), ?
+              FROM json_each(?)
+              WHERE " guard-sql "
+              ON CONFLICT(ref_name, a_edn) DO UPDATE SET
+                basis_cid = excluded.basis_cid")
+            (into [name next schema-json] guard-values)))
+          statements)
+        statements
+        (if (seq unique-attributes)
+          (into
+           statements
+           [(prepared
+             db
+             (str
+              "DELETE FROM kotobase_unique_values
+               WHERE ref_name = ?
+                 AND a_edn IN (SELECT value FROM json_each(?))
+                 AND " guard-sql)
+             (into [name unique-attributes-json] guard-values))
+            (prepared
+             db
+             (str
+              "INSERT INTO kotobase_unique_values
+                 (ref_name, a_edn, v_edn, e_edn, basis_cid)
+               SELECT d.ref_name, d.a_edn, d.v_edn, d.e_edn, ?
+               FROM kotobase_datoms_current d
+               JOIN kotobase_schema s
+                 ON s.ref_name = d.ref_name AND s.a_edn = d.a_edn
+               WHERE d.ref_name = ?
+                 AND s.unique_kind IS NOT NULL
+                 AND d.a_edn IN (SELECT value FROM json_each(?))
+                 AND " guard-sql)
+             (into [next name unique-attributes-json] guard-values))])
+          statements)
         statements
         (if recompute-all?
           (conj
@@ -291,15 +711,175 @@
   The last result is always the ref CAS, so callers retain the IRefStore
   compare-and-set contract."
   [db name expected next plan]
-  (-> (invoke db "batch"
-              (to-array
-               (projection-statements db name expected next plan)))
-      (.then
-       (fn [results]
-         (let [last-result (aget results (dec (.-length results)))
-               changes (aget (aget last-result "meta") "changes")]
-           {:published? (= 1 changes)
-            :current (when (= 1 changes) next)})))))
+  (if (and (contains? plan :validated-head)
+           (not= expected (:validated-head plan)))
+    (js/Promise.reject
+     (ex-info "Schema basis changed; retry transaction validation"
+              {:type :kotobase.datomic/schema-basis-changed
+               :validated (:validated-head plan)
+               :current expected}))
+    (-> (invoke db "batch"
+                (to-array
+                 (projection-statements db name expected next plan)))
+        (.then
+         (fn [results]
+           (let [last-result (aget results (dec (.-length results)))
+                 changes (aget (aget last-result "meta") "changes")]
+             {:published? (= 1 changes)
+              :current (when (= 1 changes) next)}))))))
+
+(defn- wire-keyword [value]
+  (if (and (string? value) (.startsWith value ":"))
+    (reader/read-string value)
+    value))
+
+(defn- schema-definitions-from-datoms [datoms]
+  (let [entities
+        (reduce
+         (fn [result {:keys [e a v_edn]}]
+           (assoc-in result [e a]
+                     (wire-keyword (reader/read-string v_edn))))
+         {}
+         datoms)]
+    (into
+     []
+     (keep
+      (fn [[_ attributes]]
+        (when-let [ident (get attributes ":db/ident")]
+          (schema-definition
+           {:db/ident ident
+            :db/valueType (get attributes ":db/valueType")
+            :db/cardinality (get attributes ":db/cardinality")
+            :db/unique (get attributes ":db/unique")}))))
+     entities)))
+
+(defn rebuild-projection!
+  "Atomically rebuild the current SQL projection from hydrated canonical datoms.
+
+  The final publication is conditional on the ref still naming `head`; a
+  concurrent transaction therefore leaves the old projection readable and the
+  caller can retry from the new canonical basis."
+  [db ref-name head datoms]
+  (let [rows
+        (mapv
+         (fn [{:keys [e a v_edn]}]
+           {:e (encoded e) :a (encoded a) :v v_edn})
+         datoms)
+        definitions (schema-definitions-from-datoms datoms)
+        validation-rows (mapv #(select-keys % [:e :a :v]) rows)
+        _ (doseq [definition definitions]
+            (validate-schema-install! definition validation-rows))
+        row-chunks (partition-all 500 rows)
+        schema-json
+        (json-source
+         (mapv (fn [{:keys [a-edn value-type cardinality unique-kind]}]
+                 {:a a-edn
+                  :valueType (str value-type)
+                  :cardinality (str cardinality)
+                  :uniqueKind (some-> unique-kind str)})
+               definitions))
+        now (.now js/Date)
+        ref-guard
+        "EXISTS (SELECT 1 FROM kotobase_refs
+                 WHERE name = ? AND cid = ?)"
+        statements
+        [(prepared db
+                   (str "DELETE FROM kotobase_datoms_current
+                         WHERE ref_name = ? AND " ref-guard)
+                   [ref-name ref-name head])
+         (prepared db
+                   (str "DELETE FROM kotobase_attribute_stats
+                         WHERE ref_name = ? AND " ref-guard)
+                   [ref-name ref-name head])
+         (prepared db
+                   (str "DELETE FROM kotobase_unique_values
+                         WHERE ref_name = ? AND " ref-guard)
+                   [ref-name ref-name head])
+         (prepared db
+                   (str "DELETE FROM kotobase_schema
+                         WHERE ref_name = ? AND " ref-guard)
+                   [ref-name ref-name head])]
+        statements
+        (into
+         statements
+         (map
+          (fn [chunk]
+            (prepared
+             db
+             (str
+              "INSERT INTO kotobase_datoms_current
+                 (ref_name, e_edn, a_edn, v_edn, tx_cid)
+               SELECT ?, json_extract(value, '$.e'),
+                      json_extract(value, '$.a'),
+                      json_extract(value, '$.v'), ?
+               FROM json_each(?)
+               WHERE " ref-guard)
+             [ref-name head (json-source (vec chunk)) ref-name head]))
+          row-chunks))
+        statements
+        (cond-> statements
+          (seq definitions)
+          (conj
+           (prepared
+            db
+            (str
+             "INSERT INTO kotobase_schema
+                (ref_name, a_edn, value_type, cardinality, unique_kind,
+                 basis_cid)
+              SELECT ?, json_extract(value, '$.a'),
+                     json_extract(value, '$.valueType'),
+                     json_extract(value, '$.cardinality'),
+                     json_extract(value, '$.uniqueKind'), ?
+              FROM json_each(?)
+              WHERE " ref-guard)
+            [ref-name head schema-json ref-name head])))
+        statements
+        (into
+         statements
+         [(prepared
+           db
+           (str
+            "INSERT INTO kotobase_attribute_stats
+               (ref_name, a_edn, datom_count, basis_cid)
+             SELECT ?, a_edn, COUNT(*), ?
+             FROM kotobase_datoms_current
+             WHERE ref_name = ? AND " ref-guard "
+             GROUP BY a_edn")
+           [ref-name head ref-name ref-name head])
+          (prepared
+           db
+           (str
+            "INSERT INTO kotobase_unique_values
+               (ref_name, a_edn, v_edn, e_edn, basis_cid)
+             SELECT d.ref_name, d.a_edn, d.v_edn, d.e_edn, ?
+             FROM kotobase_datoms_current d
+             JOIN kotobase_schema s
+               ON s.ref_name = d.ref_name AND s.a_edn = d.a_edn
+             WHERE d.ref_name = ? AND s.unique_kind IS NOT NULL
+               AND " ref-guard)
+           [head ref-name ref-name head])
+          (prepared
+           db
+           (str
+            "INSERT INTO kotobase_projection(ref_name, head_cid, updated_at)
+             SELECT ?, ?, ? WHERE " ref-guard "
+             ON CONFLICT(ref_name) DO UPDATE SET
+               head_cid = excluded.head_cid,
+               updated_at = excluded.updated_at")
+           [ref-name head now ref-name head])])]
+    (-> (invoke db "batch" (to-array statements))
+        (.then
+         (fn [results]
+           (let [last-result (aget results (dec (.-length results)))
+                 changes (aget (aget last-result "meta") "changes")]
+             (if (= 1 changes)
+               {:reindexed? true
+                :head head
+                :datom-count (count rows)
+                :schema-count (count definitions)}
+               {:reindexed? false
+                :head head
+                :reason :head-changed})))))))
 
 (defn- datalog-var? [value]
   (and (symbol? value) (.startsWith (name value) "?")))
@@ -337,14 +917,18 @@
                 (= term '_) nil
                 (contains? inputs term)
                 (do (swap! conditions conj (str qualified " = ?"))
-                    (swap! params conj (encoded (get inputs term))))
+                    (swap! params conj
+                           ((if (= column "v_edn") encoded-value encoded)
+                            (get inputs term))))
                 (datalog-var? term)
                 (if-let [previous (get @bindings term)]
                   (swap! conditions conj (str qualified " = " previous))
                   (swap! bindings assoc term qualified))
                 :else
                 (do (swap! conditions conj (str qualified " = ?"))
-                    (swap! params conj (encoded term)))))))
+                    (swap! params conj
+                           ((if (= column "v_edn") encoded-value encoded)
+                            term)))))))
         (let [find-spec (:find compiled)
               count-only? (and (= 1 (count find-spec))
                                (aggregate-count? (first find-spec)))
@@ -519,7 +1103,13 @@
                        ORDER BY " (str/join ", " columns)
                       (when limit " LIMIT ?"))
                      params
-                     (cond-> (into [ref-name] (map encoded components))
+                     (cond-> (into [ref-name]
+                                   (map (fn [column component]
+                                          ((if (= column "v_edn")
+                                             encoded-value
+                                             encoded)
+                                           component))
+                                        columns components))
                        limit (conj limit))]
                  (-> (invoke (prepared db sql params) "all")
                      (.then

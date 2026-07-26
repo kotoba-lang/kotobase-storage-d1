@@ -5,7 +5,7 @@ import {
   cacaoSiweMessage, graphCidFromName, looksLikeGraphCid
 } from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
 import {
-  headD1, transactD1, qD1, pullD1, datomsD1
+  headD1, basisD1, transactD1, reindexD1, qD1, pullD1, datomsD1
 } from "../dist/kotobase-engine.js";
 
 const TX_CAPABILITY = "kotoba://can/datom:transact";
@@ -328,6 +328,12 @@ export default {
           { recordAlias: true }
         );
       }
+      if (request.method === "POST" && url.pathname === "/v1/reindex") {
+        return datomicRequest(
+          request, env, authn, "datomic/reindex", TX_CAPABILITY,
+          (db, ref, source) => reindexD1(db, ref, source)
+        );
+      }
       if (request.method === "POST" && url.pathname === "/v1/q") {
         return datomicRequest(
           request, env, authn, "datomic/q", READ_CAPABILITY,
@@ -350,6 +356,12 @@ export default {
         return datomicRequest(
           request, env, authn, "datomic/head", READ_CAPABILITY,
           (db, ref) => headD1(db, ref)
+        );
+      }
+      if (request.method === "GET" && url.pathname === "/v1/basis") {
+        return datomicRequest(
+          request, env, authn, "datomic/basis", READ_CAPABILITY,
+          (db, ref, source) => basisD1(db, ref, source)
         );
       }
       return json({ ok: false, error: "NotFound" }, 404);
