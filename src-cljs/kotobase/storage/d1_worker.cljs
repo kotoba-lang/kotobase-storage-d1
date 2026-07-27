@@ -203,6 +203,39 @@
                    db ref-name head datoms))))))
         (.then pr-str))))
 
+(defn- hydrate-q [canonical query args]
+  (edn-promise (apply d/q query canonical (or args []))))
+
+(defn- hydrate-pull [canonical selector eid]
+  (edn-promise (d/pull canonical selector eid)))
+
+(defn- hydrate-datoms [canonical options]
+  (edn-promise (d/datoms canonical options)))
+
+(defn- with-fresh-projection!
+  "When the SQL projection is stale, rebuild once from the canonical CID head
+  then retry the fast path. Unsupported queries skip rebuild and hydrate."
+  [db ref-name reason retry-fast hydrate]
+  (if (not= reason :stale-projection)
+    (hydrate)
+    (let [canonical (database db ref-name)]
+      (-> (engine/head canonical)
+          (.then
+           (fn [head]
+             (if-not head
+               (hydrate)
+               (-> (d/datoms canonical {:index :eavt})
+                   (.then
+                    (fn [datoms]
+                      (projection/rebuild-projection!
+                       db ref-name head datoms)))
+                   (.then (fn [_] (retry-fast)))
+                   (.then
+                    (fn [{:keys [used? value]}]
+                      (if used?
+                        (pr-str value)
+                        (hydrate))))))))))))
+
 (defn ^:export q-edn! [db ref-name source]
   (let [{:keys [query args as-of since history]} (read-edn source)
         canonical (database db ref-name)]
@@ -214,11 +247,13 @@
         (edn-promise (apply d/q query view (or args []))))
       (-> (projection/fast-q! db ref-name query (or args []))
           (.then
-           (fn [{:keys [used? value]}]
+           (fn [{:keys [used? value reason]}]
              (if used?
                (pr-str value)
-               (edn-promise
-                (apply d/q query canonical (or args []))))))))))
+               (with-fresh-projection!
+                 db ref-name reason
+                 #(projection/fast-q! db ref-name query (or args []))
+                 #(hydrate-q canonical query args)))))))))
 
 (defn ^:export pull-edn! [db ref-name source]
   (let [{:keys [selector eid as-of since history]} (read-edn source)
@@ -231,11 +266,13 @@
         (edn-promise (d/pull view selector eid)))
       (-> (projection/fast-pull! db ref-name selector eid)
           (.then
-           (fn [{:keys [used? value]}]
+           (fn [{:keys [used? value reason]}]
              (if used?
                (pr-str value)
-               (edn-promise
-                (d/pull canonical selector eid)))))))))
+               (with-fresh-projection!
+                 db ref-name reason
+                 #(projection/fast-pull! db ref-name selector eid)
+                 #(hydrate-pull canonical selector eid)))))))))
 
 (defn ^:export datoms-edn! [db ref-name source]
   (let [{:keys [as-of since history] :as options} (read-edn source)
@@ -249,12 +286,13 @@
         (edn-promise (d/datoms view datom-options)))
       (-> (projection/fast-datoms! db ref-name datom-options)
           (.then
-           (fn [{:keys [used? value]}]
+           (fn [{:keys [used? value reason]}]
              (if used?
                (pr-str value)
-               (edn-promise
-                (d/datoms canonical datom-options)))))))))
-
+               (with-fresh-projection!
+                 db ref-name reason
+                 #(projection/fast-datoms! db ref-name datom-options)
+                 #(hydrate-datoms canonical datom-options)))))))))
 (defn ^:export fold-edn! [db ref-name source]
   (let [opts (read-edn source)]
     (edn-promise (d/fold (database db ref-name) opts))))

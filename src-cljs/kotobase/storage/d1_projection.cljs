@@ -1126,23 +1126,25 @@
         relation))))
 
 (defn fast-q!
-  "Return {:used? true :value x} for the SQL-compatible subset, otherwise
-  {:used? false}.  A stale/missing projection is never queried."
+  "Return {:used? true :value x :path :projection} for the SQL-compatible
+  subset, otherwise {:used? false :reason ...}. A stale/missing projection
+  is never queried (:reason :stale-projection)."
   [db ref-name query args]
   (if-let [plan (compile-sql ref-name query args)]
     (-> (projection-current? db ref-name)
         (.then
          (fn [current?]
            (if-not current?
-             {:used? false}
+             {:used? false :reason :stale-projection}
              (-> (invoke (prepared db (:sql plan) (:params plan)) "all")
                  (.then
                   (fn [result]
                     (let [rows (mapv #(row-values % plan)
                                      (array-seq (aget result "results")))]
                       {:used? true
+                       :path :projection
                        :value (shape-result rows plan)}))))))))
-    (js/Promise.resolve {:used? false})))
+    (js/Promise.resolve {:used? false :reason :unsupported-query})))
 
 (defn- flat-pull-selector? [selector]
   (and (vector? selector)
@@ -1159,12 +1161,12 @@
   "Indexed EAVT pull for wildcard and flat forward attributes."
   [db ref-name selector eid]
   (if-not (flat-pull-selector? selector)
-    (js/Promise.resolve {:used? false})
+    (js/Promise.resolve {:used? false :reason :unsupported-selector})
     (-> (projection-current? db ref-name)
         (.then
          (fn [current?]
            (if-not current?
-             {:used? false}
+             {:used? false :reason :stale-projection}
              (let [wildcard? (some #{'*} selector)
                    attributes (mapv encoded (remove #{'*} selector))
                    sql (str
@@ -1182,6 +1184,7 @@
                    (.then
                     (fn [result]
                       {:used? true
+                       :path :projection
                        :value
                        (reduce
                         (fn [pulled row]
@@ -1208,12 +1211,12 @@
     (if (or (nil? columns)
             (> (count components) (count columns))
             (and limit (not (pos-int? limit))))
-      (js/Promise.resolve {:used? false})
+      (js/Promise.resolve {:used? false :reason :unsupported-index})
       (-> (projection-current? db ref-name)
           (.then
            (fn [current?]
              (if-not current?
-               {:used? false}
+               {:used? false :reason :stale-projection}
                (let [component-conditions
                      (mapv #(str % " = ?")
                            (take (count components) columns))
@@ -1239,6 +1242,7 @@
                      (.then
                       (fn [result]
                         {:used? true
+                         :path :projection
                          :value
                          (mapv
                           (fn [row]
