@@ -261,6 +261,54 @@ if (!result.body.includes(`:e "alice"`)) {
   throw new Error(`Datomic AVET result mismatch: ${result.body}`);
 }
 
+result = await call("/v1/fold", {
+  method: "POST", auth: cacao(tx), ref: datomicRef,
+  body: `{:views
+          {"people" {"attrs" [":person/name" ":person/role"]}}}`
+});
+check("Datomic fold declares materialized view",
+      result.status, 200, result.body);
+
+result = await call("/v1/view", {
+  method: "POST", auth: cacao(read), ref: datomicRef,
+  body: `{:view "people"}`
+});
+check("Datomic materialized view", result.status, 200, result.body);
+if (!(result.body.includes(`"people"`) ||
+      (result.body.includes(`"attrs"`) &&
+       result.body.includes(`:a ":person/name"`)))) {
+  throw new Error(`Datomic materialized view mismatch: ${result.body}`);
+}
+if (result.body.includes(`:person/unrelated`)) {
+  throw new Error(`Datomic materialized view leaked an undeclared attr: ${result.body}`);
+}
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: datomicRef,
+  body: `{:tx-data
+          [{:db/id "dora"
+            :person/name "Dora"
+            :person/unrelated "must-not-leak"}]}`
+});
+check("Datomic post-fold transaction", result.status, 200, result.body);
+
+result = await call("/v1/view", {
+  method: "POST", auth: cacao(read), ref: datomicRef,
+  body: `{:view "people"}`
+});
+check("Datomic view stays fresh through SQL projection",
+      result.status, 200, result.body);
+if (!result.body.includes(`Dora`) ||
+    result.body.includes(`must-not-leak`)) {
+  throw new Error(`Datomic fresh materialized view mismatch: ${result.body}`);
+}
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: datomicRef,
+  body: `{:tx-data [[:db/retractEntity "dora"]]}`
+});
+check("Datomic view fixture cleanup", result.status, 200, result.body);
+
 result = await call("/v1/q", {
   method: "POST", auth: cacao(read), ref: datomicRef,
   body: `{:query

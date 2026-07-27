@@ -294,12 +294,68 @@
                  #(projection/fast-datoms! db ref-name datom-options)
                  #(hydrate-datoms canonical datom-options)))))))))
 (defn ^:export fold-edn! [db ref-name source]
-  (let [opts (read-edn source)]
-    (edn-promise (d/fold (database db ref-name) opts))))
+  (let [opts (read-edn source)
+        canonical (database db ref-name)]
+    (-> (engine/head canonical)
+        (.then
+         (fn [before-head]
+           ;; Publish an authenticated view declaration before the expensive
+           ;; portable IPLD fold. D1 already maintains the exact current
+           ;; datom projection transactionally, so /v1/view can become fast
+           ;; immediately even when a large canonical fold outlives the
+           ;; caller/cron execution budget. The canonical fold below still
+           ;; persists the portable view block when it completes.
+           (-> (if-not (contains? opts :views)
+                 (js/Promise.resolve nil)
+                 (projection/publish-view-specs!
+                  db ref-name before-head (:views opts)))
+               (.then (fn [_] (d/fold canonical opts)))
+               (.then
+                (fn [result]
+                  (-> (engine/head canonical)
+                      (.then
+                       (fn [after-head]
+                         (-> (projection/advance-projection-head!
+                              db ref-name before-head after-head)
+                             (.then
+                              (fn [_]
+                                (if-not (contains? opts :views)
+                                  result
+                                  (-> (projection/publish-view-specs!
+                                       db ref-name after-head (:views opts))
+                                      (.then (fn [_] result)))))))))))))))
+        (.then pr-str))))
 
 (defn ^:export view-edn! [db ref-name source]
-  (let [{:keys [view]} (read-edn source)]
-    (edn-promise (d/view (database db ref-name) view))))
+  (let [{:keys [view]} (read-edn source)
+        canonical (database db ref-name)
+        started (.now js/Date)]
+    (-> (projection/fast-view! db ref-name view)
+        (.then
+         (fn [{:keys [used? value reason]}]
+           (if used?
+             (do
+               (.log js/console
+                     (str "[kotobase/view] path=projection view=" view
+                          " elapsed_ms=" (- (.now js/Date) started)))
+               value)
+             (-> (d/view canonical view)
+                 (.then
+                  (fn [canonical-view]
+                    (.log js/console
+                          (str "[kotobase/view] path=canonical view=" view
+                               " fallback=" (name reason)
+                               " elapsed_ms=" (- (.now js/Date) started)))
+                    (if-not canonical-view
+                      nil
+                      (-> (engine/head canonical)
+                          (.then
+                           (fn [head]
+                             (-> (projection/publish-view-specs!
+                                  db ref-name head
+                                  {view (:spec canonical-view)})
+                                 (.then (fn [_] canonical-view)))))))))))))
+        (.then pr-str))))
 
 (defn ^:export basis-edn! [db ref-name _source]
   (let [snapshot (d/db (database db ref-name))]

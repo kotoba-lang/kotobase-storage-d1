@@ -1093,6 +1093,147 @@
        "first")
       (.then boolean)))
 
+(defn publish-view-specs!
+  "Apply an explicit fold :views delta to the rebuildable SQL projection.
+
+  A nil spec removes that named view; non-nil specs are upserted. The caller
+  passes the canonical head current at the declaration boundary. Every
+  statement is guarded by that head, so a concurrent transaction cannot
+  publish stale metadata."
+  [db ref-name head views]
+  (let [now (.now js/Date)
+        statements
+        (mapv
+         (fn [[view-name spec]]
+           (if (nil? spec)
+             (prepared
+              db
+              "DELETE FROM kotobase_view_specs
+               WHERE ref_name = ? AND view_name = ?
+                 AND EXISTS
+                     (SELECT 1 FROM kotobase_refs
+                      WHERE name = ? AND cid = ?)"
+              [ref-name view-name ref-name head])
+             (let [attrs (vec (get spec "attrs" []))]
+               (prepared
+                db
+                "INSERT INTO kotobase_view_specs
+                   (ref_name, view_name, spec_edn, attrs_json, basis_cid,
+                    updated_at)
+                 SELECT ?, ?, ?, ?, ?, ?
+                 WHERE EXISTS
+                     (SELECT 1 FROM kotobase_refs
+                      WHERE name = ? AND cid = ?)
+                 ON CONFLICT(ref_name, view_name) DO UPDATE SET
+                   spec_edn = excluded.spec_edn,
+                   attrs_json = excluded.attrs_json,
+                   basis_cid = excluded.basis_cid,
+                   updated_at = excluded.updated_at"
+                [ref-name view-name (pr-str spec)
+                 (json-source (mapv encoded attrs))
+                 head now ref-name head]))))
+         views)]
+    (if (empty? statements)
+      (js/Promise.resolve nil)
+      (invoke db "batch" (to-array statements)))))
+
+(defn advance-projection-head!
+  "Advance projection metadata across a logical no-op fold.
+
+  Fold rewrites the immutable chain head but preserves the exact current
+  datom set. If the SQL projection matched the pre-fold head, it is therefore
+  safe to advance every basis marker to the post-fold head without rebuilding
+  28k+ current datoms. A stale/missing projection remains stale."
+  [db ref-name before-head after-head]
+  (if (or (nil? before-head) (nil? after-head))
+    (js/Promise.resolve nil)
+    (let [guard
+          "EXISTS
+             (SELECT 1 FROM kotobase_projection p
+              JOIN kotobase_refs r ON r.name = p.ref_name
+              WHERE p.ref_name = ?
+                AND p.head_cid = ?
+                AND r.cid = ?)"
+          guarded-update
+          (fn [table column]
+            (prepared
+             db
+             (str "UPDATE " table " SET " column " = ?
+                   WHERE ref_name = ? AND " column " = ? AND " guard)
+             [after-head ref-name before-head
+              ref-name before-head after-head]))
+          statements
+          [(guarded-update "kotobase_attribute_stats" "basis_cid")
+           (guarded-update "kotobase_schema" "basis_cid")
+           (guarded-update "kotobase_unique_values" "basis_cid")
+           (guarded-update "kotobase_view_specs" "basis_cid")
+           (prepared
+            db
+            (str
+             "UPDATE kotobase_projection
+              SET head_cid = ?, updated_at = ?
+              WHERE ref_name = ? AND head_cid = ? AND " guard)
+            [after-head (.now js/Date) ref-name before-head
+             ref-name before-head after-head])]]
+      (invoke db "batch" (to-array statements)))))
+
+(defn fast-view!
+  "Serve a declared attribute view from the current SQL projection.
+
+  Returns {:used? true :value {:spec .. :rows ..}} only when both the graph
+  projection is current and an authenticated fold-declared view spec is
+  present. Missing or stale metadata falls back to the canonical IPLD view
+  path."
+  [db ref-name view-name]
+  (-> (projection-current? db ref-name)
+      (.then
+       (fn [current?]
+         (if-not current?
+           {:used? false :reason :stale-projection}
+           (-> (invoke
+                (prepared
+                 db
+                 "SELECT spec_edn, attrs_json
+                  FROM kotobase_view_specs
+                  WHERE ref_name = ? AND view_name = ?"
+                 [ref-name view-name])
+                "first")
+               (.then
+                (fn [spec-row]
+                  (if-not spec-row
+                    {:used? false :reason :missing-view-spec}
+                    (let [spec (reader/read-string (aget spec-row "spec_edn"))
+                          attrs-json (aget spec-row "attrs_json")]
+                      (-> (invoke
+                           (prepared
+                            db
+                            "SELECT e_edn, a_edn, v_edn, tx_cid
+                             FROM kotobase_datoms_current
+                             WHERE ref_name = ?
+                               AND a_edn IN
+                                   (SELECT value FROM json_each(?))
+                             ORDER BY a_edn, e_edn, v_edn"
+                            [ref-name attrs-json])
+                           "all")
+                          (.then
+                           (fn [result]
+                             {:used? true
+                              :path :projection
+                              :value
+                              {:spec spec
+                               :rows
+                               (mapv
+                                (fn [row]
+                                  {:e (reader/read-string
+                                       (aget row "e_edn"))
+                                   :a (reader/read-string
+                                       (aget row "a_edn"))
+                                   :v_edn (aget row "v_edn")
+                                   :tx (aget row "tx_cid")
+                                   :added true})
+                                (array-seq
+                                 (aget result "results")))}})))))))))))))
+
 (defn- row-values [row {:keys [column-count count-only?]}]
   (mapv
    (fn [index]
