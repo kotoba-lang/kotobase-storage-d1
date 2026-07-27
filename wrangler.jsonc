@@ -10,11 +10,6 @@
   "main": "src/worker.mjs",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
-  // Canonical fold rebuilds the indexed snapshot. Keep a finite ceiling, but
-  // give this maintenance request enough CPU to finish one bounded (max 200
-  // novelty blocks) pass instead of repeatedly losing all work at the default
-  // 30-second limit with Cloudflare error 1102.
-  "limits": { "cpu_ms": 300000 },
   // Cloudflare blocks fetch() from one *.workers.dev Worker to another
   // (error 1042) -- confirmed live 2026-07-26 when gftdcojp/net-kotobase's
   // env.d1 (also workers.dev) tried to reach this Worker's workers.dev URL
