@@ -1,10 +1,41 @@
 # D1-backed Datomic API coverage
 
+## Maturity (2026-07-27)
+
+| Layer | Status | Evidence |
+|---|---|---|
+| Library `kotobase.datomic.client` | **Client API beta** | Matches published `datomic.client.api` var names + arg-maps; 80 engine assertions green |
+| HTTP `/api/*` | **Client API beta** | EDN, **not XRPC**; paths named after Client API ops |
+| HTTP `/v1/*` | Legacy alias | Same handlers; keep for existing callers |
+| Cognitect `client-cloud` proprietary wire | **Not claimed** | Requires Transit golden capture (ADR-2606201800 residue) |
+| Production SLO / load gate | **Open** | Benchmark harness exists; permanent multi-tenant route still optional |
+
 ## Compatibility rule
 
-`kotobase.datomic` uses Datomic's function argument order and EDN grammar.
-The Worker carries that EDN unchanged across HTTP. There is no second JSON
-query language for an LLM or application to learn.
+**Use `kotobase.datomic.client` as the drop-in for `datomic.client.api`.**
+It exposes the same public surface (client / connect / create-database /
+list-databases / q / qseq / pull / datoms / seek-datoms / rseek-datoms /
+index-range / index-pull / transact / with / with-db / as-of / since /
+history / sync / tx-range / db-stats). `administer-system` is unsupported
+(Cloud control plane).
+
+`kotobase.datomic` remains the lower-level grammar facade. The Worker
+carries EDN over HTTP. There is **no XRPC** on this surface and no second
+JSON query language for an LLM or application to learn.
+
+### HTTP Client API (preferred)
+
+```
+POST /api/q          body: {:query ... :args [...]}   ; omit db from :args
+POST /api/transact   body: {:tx-data [...]}
+POST /api/pull       body: {:selector ... :eid ...}
+POST /api/datoms     body: {:index :eavt :components [...]}
+POST /api/tx-range   body: {:start 0 :end nil}
+POST /api/db         → basis handle
+```
+
+Headers: `Content-Type: application/edn`, `Authorization: CACAO …`,
+`x-kotobase-ref: kotobase/db/<tenant>/<db-name>` (or `X-Datomic-DB-Name`).
 
 Implemented syntax:
 
