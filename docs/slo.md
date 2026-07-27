@@ -25,6 +25,17 @@ KOTOBASE_SLO_ENTITIES=300 \
 npm run slo:qualify
 ```
 
+## Latest measured (2026-07-27, N=300, CACAO did:key)
+
+| Path | point p50 | count p50 | join p50 | transact | reindex | transport |
+|------|-----------|-----------|----------|----------|---------|-----------|
+| D1 direct | 682 ms | 650 ms | 604 ms | 3193 ms | 1369 ms | public HTTPS |
+| edge `kotobase.net` | 659 ms | 639 ms | 681 ms | 3039 ms | 1990 ms* | **service-binding** |
+
+\*reindex still hits D1 `/v1/reindex` (not exposed on edge `/api/*`).
+
+Evidence: `docs/evidence/slo-auth-2026-07-27.edn`. Both paths green under v1 gates.
+
 ## Cold / index-pruned read policy
 
 1. Prefer SQL projection when `projection.head_cid == refs.cid`.
