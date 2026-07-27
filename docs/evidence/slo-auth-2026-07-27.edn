@@ -1,0 +1,38 @@
+{:evidence/id "slo-auth-2026-07-27"
+ :evidence/date "2026-07-27"
+ :evidence/kind :slo-qualification
+ :evidence/hosts ["https://kotobase-storage-d1.aozora.app"
+                  "https://kotobase.net"]
+ :evidence/auth :cacao-did-key-ed25519
+ :evidence/entities 300
+ :evidence/gates {:point-p50-ms 1500
+                  :count-p50-ms 1500
+                  :join-p50-ms 2000
+                  :transact-ms 5000
+                  :reindex-ms 8000}
+ :evidence/runs
+ [{:path :d1-direct
+   :endpoint "https://kotobase-storage-d1.aozora.app"
+   :runner "npm run slo:qualify / node scripts/slo-qualify.mjs"
+   :ok true
+   :measured {:transact-ms 3192.6
+              :reindex-ms 1369.4
+              :point-p50-ms 682.0
+              :count-p50-ms 649.7
+              :join-p50-ms 603.6}}
+  {:path :edge-service-binding
+   :endpoint "https://kotobase.net"
+   :transport "service-binding"
+   :note "reindex via D1 /v1/reindex (not on edge /api/* surface)"
+   :ok true
+   :measured {:transact-ms 3038.9
+              :reindex-ms 1990.4
+              :point-p50-ms 658.9
+              :count-p50-ms 638.6
+              :join-p50-ms 681.5
+              :edge-transact-transport "service-binding"
+              :edge-query-transport "service-binding"}}]
+ :evidence/notes
+ ["Gates are measured production qualification, not contractual multi-tenant SLA."
+  "Warm projection samples exclude first request of each sample loop."
+  "Edge path confirms Service Binding is live on auth success path."]}
