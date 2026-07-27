@@ -8,9 +8,9 @@
 
 | Metric | Default gate | Notes |
 |---|---|---|
-| point query p50 | ≤ 120 ms | projection path (N entities) |
-| count query p50 | ≤ 150 ms | projection path |
-| join+count p50 | ≤ 200 ms | projection path |
+| point query p50 | ≤ 1500 ms | includes CF RTT + CACAO + D1 |
+| count query p50 | ≤ 1500 ms | projection path when warm |
+| join+count p50 | ≤ 2000 ms | projection path when warm |
 | transact wall | ≤ 5000 ms | batch of N entity maps |
 | cold reindex wall | ≤ 8000 ms | rebuild projection then query |
 | entities N | 300 | override with `KOTOBASE_SLO_ENTITIES` |
