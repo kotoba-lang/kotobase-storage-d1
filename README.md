@@ -57,6 +57,16 @@ CACAO in `authorization`. Query text is data parsed by the ClojureScript EDN
 reader; it is never evaluated as code. Predicate/function clauses use the
 engine's fixed whitelist.
 
+`GET /v1/session` is the identity-service read boundary used by application
+Workers. It accepts an opaque `Bearer` token, hashes it with SHA-256, and
+resolves only the digest from the canonical Datomic session entity in the
+`x-kotobase-ref` database. The endpoint fails closed unless the D1 projection
+head equals the canonical immutable head, the user and tenant membership are
+active, the `x-kotobase-application` audience matches the durable session, and
+the session is neither expired nor revoked. Raw session tokens are never stored
+or logged. OAuth state and one-time challenges remain KV/DO data; durable users,
+identities, memberships, and session revocation are Datomic.
+
 `x-kotobase-ref` accepts either the literal ref name
 (`kotobase/db/<tenant_did>/<db_name>`) or its content-addressed CID
 (`graphCidFromName` from `gftdcojp/net-kotobase`'s `kotobase.graph`,

@@ -20,6 +20,10 @@ function base64(bytes) {
   return Buffer.from(bytes).toString("base64");
 }
 
+function base64url(bytes) {
+  return Buffer.from(bytes).toString("base64url");
+}
+
 function instant(offsetSeconds = 0) {
   const value = new Date(Date.now() + offsetSeconds * 1000);
   value.setMilliseconds(0);
@@ -46,8 +50,13 @@ function cacao(capability, nonce = crypto.randomUUID()) {
   }))}`;
 }
 
-async function call(path, { method = "GET", auth, body, ref } = {}) {
-  const headers = { "x-request-id": crypto.randomUUID() };
+async function call(path, {
+  method = "GET", auth, body, ref, headers: extraHeaders = {}
+} = {}) {
+  const headers = {
+    "x-request-id": crypto.randomUUID(),
+    ...extraHeaders
+  };
   if (auth) headers.authorization = auth;
   if (ref) headers["x-kotobase-ref"] = ref;
   if (body !== undefined) {
@@ -512,13 +521,144 @@ result = await call("/v1/q", {
 check("query after reindex", result.status, 200, result.body);
 check("reindex preserves current basis", result.body, `"account-1"`);
 
+const authRef = `kotobase/db/${did}/identity-${crypto.randomUUID()}`;
+const sessionToken = `opaque-${crypto.randomUUID()}-${crypto.randomUUID()}`;
+const sessionTokenDigest = base64url(
+  new Uint8Array(await crypto.subtle.digest(
+    "SHA-256", encoder.encode(sessionToken)
+  ))
+);
+const sessionExpiresAt = Date.now() + 60_000;
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: authRef,
+  body: `{:tx-data
+          [{:db/id :identity.user/id
+            :db/ident :identity.user/id
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one
+            :db/unique :db.unique/identity}
+           {:db/id :identity.user/status
+            :db/ident :identity.user/status
+            :db/valueType :db.type/keyword
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.tenant/id
+            :db/ident :identity.tenant/id
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one
+            :db/unique :db.unique/identity}
+           {:db/id :identity.membership/user
+            :db/ident :identity.membership/user
+            :db/valueType :db.type/ref
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.membership/tenant
+            :db/ident :identity.membership/tenant
+            :db/valueType :db.type/ref
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.membership/role
+            :db/ident :identity.membership/role
+            :db/valueType :db.type/keyword
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.membership/permissions
+            :db/ident :identity.membership/permissions
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/many}
+           {:db/id :identity.session/id
+            :db/ident :identity.session/id
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one
+            :db/unique :db.unique/identity}
+           {:db/id :identity.session/token-digest
+            :db/ident :identity.session/token-digest
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one
+            :db/unique :db.unique/identity}
+           {:db/id :identity.session/user
+            :db/ident :identity.session/user
+            :db/valueType :db.type/ref
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.session/tenant
+            :db/ident :identity.session/tenant
+            :db/valueType :db.type/ref
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.session/application
+            :db/ident :identity.session/application
+            :db/valueType :db.type/string
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.session/created-at
+            :db/ident :identity.session/created-at
+            :db/valueType :db.type/long
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.session/expires-at
+            :db/ident :identity.session/expires-at
+            :db/valueType :db.type/long
+            :db/cardinality :db.cardinality/one}
+           {:db/id :identity.session/revoked?
+            :db/ident :identity.session/revoked?
+            :db/valueType :db.type/boolean
+            :db/cardinality :db.cardinality/one}]}`
+});
+check("identity schema install", result.status, 200, result.body);
+
+result = await call("/v1/transact", {
+  method: "POST", auth: cacao(tx), ref: authRef,
+  body: `{:tx-data
+          [{:db/id "auth-user"
+            :identity.user/id "user-1"
+            :identity.user/status :active}
+           {:db/id "auth-tenant"
+            :identity.tenant/id "tenant-1"}
+           {:db/id "auth-membership"
+            :identity.membership/user "auth-user"
+            :identity.membership/tenant "auth-tenant"
+            :identity.membership/role :owner
+            :identity.membership/permissions #{"datom:read" "datom:transact"}}
+           {:db/id "auth-session"
+            :identity.session/id "session-1"
+            :identity.session/token-digest "${sessionTokenDigest}"
+            :identity.session/user "auth-user"
+            :identity.session/tenant "auth-tenant"
+            :identity.session/application "verification"
+            :identity.session/created-at ${Date.now()}
+            :identity.session/expires-at ${sessionExpiresAt}
+            :identity.session/revoked? false}]}`
+});
+check("Datomic identity session transact", result.status, 200, result.body);
+
+result = await call("/v1/session", {
+  auth: `Bearer ${sessionToken}`, ref: authRef,
+  headers: { "x-kotobase-application": "verification" }
+});
+check("Datomic identity session resolves", result.status, 200, result.body);
+check("resolved session user", result.body.context.claims.userId, "user-1");
+check("resolved session tenant", result.body.context.targetOrgId, "tenant-1");
+
+result = await call("/v1/session", {
+  auth: `Bearer ${sessionToken}`, ref: authRef,
+  headers: { "x-kotobase-application": "verification" }
+});
+check("opaque session lookup is reusable", result.status, 200, result.body);
+
+result = await call("/v1/session", {
+  auth: `Bearer ${sessionToken}`, ref: authRef,
+  headers: { "x-kotobase-application": "another-application" }
+});
+check("session application audience enforced", result.status, 403, result.body);
+
+result = await call("/v1/session", {
+  auth: "Bearer unknown-session-token", ref: authRef,
+  headers: { "x-kotobase-application": "verification" }
+});
+check("unknown opaque session denied", result.status, 401, result.body);
+
 console.log(JSON.stringify({
   ok: true,
   endpoint,
   principal: did,
   ref,
   datomicRef,
-  schemaRef
+  schemaRef,
+  authRef
 }, null, 2));
 
 function percentile(values, fraction) {
