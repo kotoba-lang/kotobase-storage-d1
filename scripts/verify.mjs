@@ -97,6 +97,15 @@ const bytesB = base64(encoder.encode("immutable-block-b"));
 let result = await call("/health");
 check("D1 health", result.status, 200);
 check("health backend", result.body.backend, "cloudflare-d1");
+check("health api is Client API", result.body.api, "datomic.client.api");
+check("health is not XRPC", result.body.xrpc, false);
+check("health maturity", result.body.maturity, "client-api-beta");
+if (!Array.isArray(result.body.routes) ||
+    !result.body.routes.includes("/api/q") ||
+    !result.body.routes.includes("/api/transact")) {
+  throw new Error(`health routes missing Client API paths: ${JSON.stringify(result.body.routes)}`);
+}
+check("health routes include /api/q", true, true);
 
 result = await call("/v1/commit", {
   method: "POST",
@@ -651,6 +660,71 @@ result = await call("/v1/session", {
 });
 check("unknown opaque session denied", result.status, 401, result.body);
 
+// ---------------------------------------------------------------------------
+// Official Client API surface under /api/* (not XRPC)
+// ---------------------------------------------------------------------------
+const clientApiRef =
+  `kotobase/db/${did}/client-api-${crypto.randomUUID()}`;
+const clientDbName = clientApiRef.split("/").pop();
+
+result = await call("/api/transact", {
+  method: "POST", auth: cacao(tx), ref: clientApiRef,
+  body: `{:tx-data
+          [{:db/id "carol"
+            :person/name "Carol"
+            :person/role "admin"}]}`
+});
+check("Client API /api/transact", result.status, 200, result.body);
+if (!result.body.includes(":db-after")) {
+  throw new Error(`Client API tx-report missing :db-after: ${result.body}`);
+}
+
+result = await call("/api/q", {
+  method: "POST", auth: cacao(read), ref: clientApiRef,
+  body: `{:query
+          [:find ?e ?name
+           :where
+           [?e :person/role "admin"]
+           [?e :person/name ?name]]}`
+});
+check("Client API /api/q", result.status, 200, result.body);
+check("Client API /api/q result", result.body, `#{["carol" "Carol"]}`);
+
+result = await call("/api/pull", {
+  method: "POST", auth: cacao(read), ref: clientApiRef,
+  body: `{:selector [:person/name :person/role] :eid "carol"}`
+});
+check("Client API /api/pull", result.status, 200, result.body);
+if (!(result.body.includes("Carol") && result.body.includes("person/name"))) {
+  throw new Error(`Client API pull mismatch: ${result.body}`);
+}
+
+result = await call("/api/datoms", {
+  method: "POST", auth: cacao(read), ref: clientApiRef,
+  body: `{:index :eavt :components ["carol"]}`
+});
+check("Client API /api/datoms", result.status, 200, result.body);
+if (!result.body.includes(`:e "carol"`)) {
+  throw new Error(`Client API datoms mismatch: ${result.body}`);
+}
+
+result = await call("/api/db", {
+  method: "POST", auth: cacao(read), ref: clientApiRef,
+  body: `{}`
+});
+check("Client API /api/db (basis)", result.status, 200, result.body);
+
+// Bare db-name header resolves under the authenticated tenant DID.
+result = await call("/api/q", {
+  method: "POST", auth: cacao(read),
+  headers: { "x-datomic-db-name": clientDbName },
+  body: `{:query
+          [:find ?name .
+           :where ["carol" :person/name ?name]]}`
+});
+check("Client API X-Datomic-DB-Name bare name", result.status, 200, result.body);
+check("Client API bare-name q result", result.body, `"Carol"`);
+
 console.log(JSON.stringify({
   ok: true,
   endpoint,
@@ -658,7 +732,10 @@ console.log(JSON.stringify({
   ref,
   datomicRef,
   schemaRef,
-  authRef
+  authRef,
+  clientApiRef,
+  surface: "datomic.client.api",
+  xrpc: false
 }, null, 2));
 
 function percentile(values, fraction) {

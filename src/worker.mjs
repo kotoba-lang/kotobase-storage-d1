@@ -233,8 +233,19 @@ async function readRef(request, env, authn) {
     json({ ok: false, error: "NotFound" }, 404);
 }
 
-function databaseRef(request) {
-  return request.headers.get("x-kotobase-ref") || "";
+function databaseRef(request, authn = null) {
+  const full = request.headers.get("x-kotobase-ref") || "";
+  if (full) return full;
+  // Official Client API style: bare :db-name via header.
+  const named = request.headers.get("x-datomic-db-name")
+    || request.headers.get("X-Datomic-DB-Name")
+    || "";
+  if (!named) return "";
+  if (named.includes("/")) return named;
+  // Scope bare names under the authenticated tenant DID when present.
+  const iss = authn?.claims?.iss || authn?.iss;
+  if (iss) return `kotobase/db/${iss}/${named}`;
+  return named;
 }
 
 function base64url(bytes) {
@@ -452,7 +463,7 @@ async function readEdnBody(request) {
 async function datomicRequest(
   request, env, authn, action, capability, invoke, { recordAlias = false } = {},
 ) {
-  const rawRef = databaseRef(request);
+  const rawRef = databaseRef(request, authn);
   const ref = await resolveRef(env, rawRef);
   if (ref === null) {
     // A CID nothing has ever transacted into -- matches Datomic's own
@@ -488,6 +499,7 @@ async function datomicRequest(
  * Database selection uses `x-kotobase-ref` or `X-Datomic-DB-Name`
  * (resolved to `kotobase/db/<tenant>/<name>` when a bare name is given).
  */
+// dead helper removed — databaseRef() handles Client API db-name headers
 const CLIENT_API_ROUTES = {
   "/api/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: (db, ref, source) => transactD1(db, ref, source), recordAlias: true, clientApi: true },
   "/api/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: (db, ref, source) => qD1(db, ref, source), clientApi: true },
@@ -510,36 +522,6 @@ const CLIENT_API_ROUTES = {
   "/v1/listeners/register": { method: "POST", capability: TX_CAPABILITY, action: "datomic/listener-admin", invoke: (db, ref, source) => listenerD1(db, ref, source) },
   "/v1/listeners/ack": { method: "POST", capability: TX_CAPABILITY, action: "datomic/listener-admin", invoke: (db, ref, source) => listenerD1(db, ref, source) }
 };
-
-function databaseRefFromClientApi(request) {
-  const named = request.headers.get("x-datomic-db-name")
-    || request.headers.get("X-Datomic-DB-Name");
-  if (named) {
-    // Bare Client API db-name → tenant-scoped kotobase ref when no full path.
-    if (named.includes("/")) return named;
-    const auth = request.headers.get("authorization") || "";
-    // Tenant is resolved later via CACAO; use a stable prefix placeholder that
-    // authorize() will still scope-check against the signed graph resource.
-    return named;
-  }
-  return databaseRef(request);
-}
-
-/**
- * Normalize official Client API arg-maps to the engine EDN envelopes.
- * q: {:query ... :args [db? & inputs]} → drop leading db handle from :args
- * pull: {:selector ... :eid ...} stays as-is (engine accepts both shapes)
- * transact: {:tx-data ...} stays as-is
- */
-function normalizeClientApiSource(pathname, source) {
-  if (!source) return source;
-  // Lightweight EDN surgery without a full parser: only rewrite :args vectors
-  // that begin with a map/db placeholder is handled server-side by ignoring
-  // the connection handle when present as first :args element via cljs.
-  // For now pass through — d1_worker q-edn treats :args as inputs only;
-  // clients must omit the db from :args on the HTTP surface (documented).
-  return source;
-}
 
 export default {
   async fetch(request, env) {
@@ -592,19 +574,9 @@ export default {
 
       const route = CLIENT_API_ROUTES[url.pathname];
       if (route && request.method === route.method) {
-        // Prefer Client API db-name header when present.
-        if (route.clientApi) {
-          const named = request.headers.get("x-datomic-db-name");
-          if (named && !request.headers.get("x-kotobase-ref")) {
-            // inject via temporary header mutation on a cloned request is
-            // awkward; resolve in datomicRequest by reading both headers.
-          }
-        }
         return datomicRequest(
           request, env, authn, route.action, route.capability,
-          (db, ref, source) => route.invoke(
-            db, ref, normalizeClientApiSource(url.pathname, source)
-          ),
+          (db, ref, source) => route.invoke(db, ref, source),
           { recordAlias: !!route.recordAlias }
         );
       }
