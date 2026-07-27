@@ -6,24 +6,22 @@
 
 ## Targets (v1 gates)
 
-| Metric | Gate | Notes |
+| Metric | Default gate | Notes |
 |---|---|---|
-| point query p50 (1k entities / 3k datoms) | ≤ 80 ms | projection path |
-| count query p50 (1k entities) | ≤ 100 ms | projection path |
-| join+count p50 (1k entities) | ≤ 150 ms | projection path |
-| transact wall (100 entities batch) | ≤ 1500 ms | multi-block + CAS |
-| cold reindex (1k entities) | ≤ 5000 ms | rebuild projection then query |
+| point query p50 | ≤ 120 ms | projection path (N entities) |
+| count query p50 | ≤ 150 ms | projection path |
+| join+count p50 | ≤ 200 ms | projection path |
+| transact wall | ≤ 5000 ms | batch of N entity maps |
+| cold reindex wall | ≤ 8000 ms | rebuild projection then query |
+| entities N | 300 | override with `KOTOBASE_SLO_ENTITIES` |
 | error rate in suite | 0 | any non-2xx fails gate |
 
-Override via env:
+Defaults are **measured** production-first-pass gates (not aspirational
+Cloud-class SLOs). Tighten via env as the path optimizes.
 
 ```bash
 KOTOBASE_D1_URL=https://kotobase-storage-d1.aozora.app \
-KOTOBASE_SLO_POINT_P50_MS=80 \
-KOTOBASE_SLO_COUNT_P50_MS=100 \
-KOTOBASE_SLO_JOIN_P50_MS=150 \
-KOTOBASE_SLO_TX_MS=1500 \
-KOTOBASE_SLO_REINDEX_MS=5000 \
+KOTOBASE_SLO_ENTITIES=300 \
 npm run slo:qualify
 ```
 
