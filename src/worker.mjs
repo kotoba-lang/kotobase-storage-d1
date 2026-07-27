@@ -185,13 +185,20 @@ async function commit(request, env, authn) {
   }
 
   const bytes = bytesFromBase64(encoded);
+  // Blocks are keyed by (principal, cid) as of migration 0007. While the key
+  // was `cid` alone, the first writer of a CID owned it for every tenant: the
+  // read-back below turned that into a 409 rather than serving attacker bytes,
+  // but the legitimate owner was then permanently unable to store their own
+  // block. `authn.claims.iss` is the same principal `authorize` just checked
+  // the `kotobase/db/<iss>/` resource prefix against.
+  const principal = authn.claims.iss;
   await env.DB.prepare(
-    `INSERT INTO kotobase_blocks(cid, bytes, byte_length, created_at)
-     VALUES (?, ?, ?, ?) ON CONFLICT(cid) DO NOTHING`
-  ).bind(cid, bytes.buffer, bytes.length, Date.now()).run();
+    `INSERT INTO kotobase_blocks(principal, cid, bytes, byte_length, created_at)
+     VALUES (?, ?, ?, ?, ?) ON CONFLICT(principal, cid) DO NOTHING`
+  ).bind(principal, cid, bytes.buffer, bytes.length, Date.now()).run();
   const stored = await env.DB.prepare(
-    "SELECT bytes FROM kotobase_blocks WHERE cid = ?"
-  ).bind(cid).first();
+    "SELECT bytes FROM kotobase_blocks WHERE principal = ? AND cid = ?"
+  ).bind(principal, cid).first();
   if (!stored || !sameBytes(stored.bytes, bytes)) {
     return json({ ok: false, error: "CidCollision" }, 409);
   }

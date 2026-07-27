@@ -3,7 +3,8 @@
 
   The exported boundary accepts and returns EDN so Datomic keywords, symbols,
   sets, pull selectors, and query vectors survive the JavaScript transport."
-  (:require [cljs.reader :as reader]
+  (:require [clojure.string :as string]
+            [cljs.reader :as reader]
             [kotobase.datomic :as d]
             [kotobase.engine :as engine]
             [kotobase.storage.d1-projection :as projection]
@@ -34,7 +35,19 @@
              (= (aget left index) (aget right index)) (recur (inc index))
              :else false)))))
 
-(defrecord D1Storage [db projection-plan]
+;; `tenant` is the authenticated did:key the blocks belong to. `kotobase_blocks`
+;; was keyed on `cid` alone while refs were per-DID, so the block store was the
+;; one shared surface under an otherwise isolated tenant model: whoever wrote a
+;; CID first owned it globally. The read-back below turns that into an error
+;; rather than served attacker bytes, but the victim still gets a permanent
+;; CidCollision on a block they legitimately own. Migration 0007 scopes the key
+;; to (principal, cid); this threads the principal into every block statement.
+;;
+;; It is derived from ref-name rather than passed in, because authorization
+;; already requires the resource to sit under `kotobase/db/<iss>/` -- deriving
+;; it from the same string the authz check ran against means the two cannot
+;; drift apart.
+(defrecord D1Storage [db projection-plan tenant]
   storage/IBlockStore
   (-put-blocks! [_ blocks]
     (-> (js/Promise.all
@@ -45,9 +58,9 @@
               (prepared
                db
                "INSERT INTO kotobase_blocks
-                (cid, bytes, byte_length, created_at)
-                VALUES (?, ?, ?, ?) ON CONFLICT(cid) DO NOTHING"
-               [cid (bytes-buffer bytes) (.-byteLength bytes) (.now js/Date)])
+                (principal, cid, bytes, byte_length, created_at)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT(principal, cid) DO NOTHING"
+               [tenant cid (bytes-buffer bytes) (.-byteLength bytes) (.now js/Date)])
               "run"))
            blocks)))
         (.then
@@ -58,8 +71,9 @@
               (fn [{:keys [cid]}]
                 (invoke
                  (prepared db
-                           "SELECT bytes FROM kotobase_blocks WHERE cid = ?"
-                           [cid])
+                           "SELECT bytes FROM kotobase_blocks
+                            WHERE principal = ? AND cid = ?"
+                           [tenant cid])
                  "first"))
               blocks)))))
         (.then
@@ -79,8 +93,9 @@
            (fn [cid]
              (-> (invoke
                   (prepared db
-                            "SELECT bytes FROM kotobase_blocks WHERE cid = ?"
-                            [cid])
+                            "SELECT bytes FROM kotobase_blocks
+                             WHERE principal = ? AND cid = ?"
+                            [tenant cid])
                   "first")
                  (.then
                   (fn [row]
@@ -144,11 +159,25 @@
     #{:immutable-blocks :cid-addressed-read :conditional-ref
       :linearizable-ref :batch-get :batch-put :cloudflare-d1}))
 
+(defn- ref-principal
+  "The did:key a ref belongs to. Ref names are `kotobase/db/<iss>/<name>`, and
+  authorization rejects anything outside that prefix, so this is exactly the
+  principal the request was authorized as. Returns \"\" for a malformed name,
+  which no authenticated principal can ever equal, so such a request reads and
+  writes nothing rather than falling back to the shared surface."
+  [ref-name]
+  (let [parts (string/split (str ref-name) #"/")]
+    (if (and (= "kotobase" (nth parts 0 nil))
+             (= "db" (nth parts 1 nil))
+             (seq (nth parts 2 nil)))
+      (nth parts 2)
+      "")))
+
 (defn- database
   ([db ref-name] (database db ref-name nil))
   ([db ref-name projection-plan]
   (engine/open
-   {:storage (->D1Storage db projection-plan)
+   {:storage (->D1Storage db projection-plan (ref-principal ref-name))
     :ref-name ref-name
     :encrypt-fn #(js/Promise.resolve %)
     :decrypt-fn #(js/Promise.resolve %)
