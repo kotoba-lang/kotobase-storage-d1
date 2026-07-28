@@ -1,6 +1,7 @@
 import * as dagCbor from "@ipld/dag-cbor";
 import { ed25519 } from "@noble/curves/ed25519";
 import { base58btc } from "multiformats/bases/base58";
+import { WorkflowEntrypoint } from "cloudflare:workers";
 import {
   cacaoSiweMessage, graphCidFromName, looksLikeGraphCid
 } from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
@@ -12,6 +13,220 @@ import {
 const TX_CAPABILITY = "kotoba://can/datom:transact";
 const READ_CAPABILITY = "kotoba://can/graph:query";
 const textEncoder = new TextEncoder();
+const COMPACTION_PAGE_SIZE = 250;
+
+function hex(bytes) {
+  return Array.from(new Uint8Array(bytes), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function sha256(value) {
+  return hex(await crypto.subtle.digest("SHA-256", textEncoder.encode(value)));
+}
+
+function cursorOf(row) {
+  return {
+    e: row.e_edn,
+    a: row.a_edn,
+    v: row.v_edn
+  };
+}
+
+async function currentProjectionHead(db, ref) {
+  const row = await db.prepare(
+    "SELECT head_cid FROM kotobase_projection WHERE ref_name = ?"
+  ).bind(ref).first();
+  return row?.head_cid || null;
+}
+
+async function nextCompactionCandidate(db) {
+  return db.prepare(
+    `SELECT p.ref_name, p.head_cid
+       FROM kotobase_projection p
+       LEFT JOIN kotobase_canonical_checkpoints c
+         ON c.ref_name = p.ref_name
+      WHERE c.source_head IS NULL OR c.source_head <> p.head_cid
+      ORDER BY (
+        SELECT COUNT(*)
+          FROM kotobase_datoms_current d
+         WHERE d.ref_name = p.ref_name
+      ) DESC
+      LIMIT 1`
+  ).first();
+}
+
+async function readCompactionPage(db, ref, cursor) {
+  if (!cursor) {
+    return db.prepare(
+      `SELECT e_edn, a_edn, v_edn, tx_cid
+         FROM kotobase_datoms_current
+        WHERE ref_name = ?
+        ORDER BY e_edn, a_edn, v_edn
+        LIMIT ?`
+    ).bind(ref, COMPACTION_PAGE_SIZE).all();
+  }
+  return db.prepare(
+    `SELECT e_edn, a_edn, v_edn, tx_cid
+       FROM kotobase_datoms_current
+      WHERE ref_name = ?
+        AND (
+          e_edn > ?
+          OR (e_edn = ? AND a_edn > ?)
+          OR (e_edn = ? AND a_edn = ? AND v_edn > ?)
+        )
+      ORDER BY e_edn, a_edn, v_edn
+      LIMIT ?`
+  ).bind(
+    ref,
+    cursor.e,
+    cursor.e, cursor.a,
+    cursor.e, cursor.a, cursor.v,
+    COMPACTION_PAGE_SIZE
+  ).all();
+}
+
+/**
+ * Build a generation-stamped canonical D1 checkpoint without ever holding the
+ * full graph in a Worker heap. A generation is published only when the D1
+ * projection head is unchanged from selection through finalization.
+ */
+export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
+  async run(_event, step) {
+    const candidate = await step.do("select changed graph", async () => {
+      const row = await nextCompactionCandidate(this.env.DB);
+      if (!row) return null;
+      const generation = crypto.randomUUID();
+      const now = Date.now();
+      await this.env.DB.prepare(
+        `INSERT INTO kotobase_compaction_jobs
+           (generation, ref_name, source_head, status, started_at, updated_at)
+         VALUES (?, ?, ?, 'running', ?, ?)`
+      ).bind(generation, row.ref_name, row.head_cid, now, now).run();
+      return {
+        generation,
+        ref: row.ref_name,
+        sourceHead: row.head_cid
+      };
+    });
+    if (!candidate) return { ok: true, skipped: "all checkpoints current" };
+
+    let cursor = null;
+    let pageNo = 0;
+    let rowCount = 0;
+    while (true) {
+      const page = await step.do(`checkpoint page ${pageNo}`, async () => {
+        const currentHead = await currentProjectionHead(
+          this.env.DB, candidate.ref
+        );
+        if (currentHead !== candidate.sourceHead) {
+          await this.env.DB.prepare(
+            `UPDATE kotobase_compaction_jobs
+                SET status = 'stale', error = 'projection head changed',
+                    updated_at = ?, completed_at = ?
+              WHERE generation = ?`
+          ).bind(Date.now(), Date.now(), candidate.generation).run();
+          return { stale: true };
+        }
+
+        const result = await readCompactionPage(
+          this.env.DB, candidate.ref, cursor
+        );
+        const rows = result.results || [];
+        if (rows.length === 0) return { done: true };
+
+        const rowsJson = JSON.stringify(rows);
+        const first = cursorOf(rows[0]);
+        const last = cursorOf(rows[rows.length - 1]);
+        const digest = await sha256(rowsJson);
+        const now = Date.now();
+        await this.env.DB.batch([
+          this.env.DB.prepare(
+            `INSERT INTO kotobase_canonical_checkpoint_pages
+               (ref_name, generation, page_no,
+                first_e_edn, first_a_edn, first_v_edn,
+                last_e_edn, last_a_edn, last_v_edn,
+                row_count, sha256, rows_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            candidate.ref, candidate.generation, pageNo,
+            first.e, first.a, first.v,
+            last.e, last.a, last.v,
+            rows.length, digest, rowsJson, now
+          ),
+          this.env.DB.prepare(
+            `UPDATE kotobase_compaction_jobs
+                SET page_count = page_count + 1,
+                    row_count = row_count + ?,
+                    updated_at = ?
+              WHERE generation = ?`
+          ).bind(rows.length, now, candidate.generation)
+        ]);
+        return { done: false, cursor: last, rows: rows.length };
+      });
+
+      if (page.stale) {
+        return {
+          ok: false,
+          stale: true,
+          generation: candidate.generation
+        };
+      }
+      if (page.done) break;
+      cursor = page.cursor;
+      rowCount += page.rows;
+      pageNo += 1;
+    }
+
+    return step.do("publish checkpoint", async () => {
+      const currentHead = await currentProjectionHead(
+        this.env.DB, candidate.ref
+      );
+      if (currentHead !== candidate.sourceHead) {
+        await this.env.DB.prepare(
+          `UPDATE kotobase_compaction_jobs
+              SET status = 'stale', error = 'projection head changed at publish',
+                  updated_at = ?, completed_at = ?
+            WHERE generation = ?`
+        ).bind(Date.now(), Date.now(), candidate.generation).run();
+        return { ok: false, stale: true };
+      }
+
+      const now = Date.now();
+      await this.env.DB.batch([
+        this.env.DB.prepare(
+          `INSERT INTO kotobase_canonical_checkpoints
+             (ref_name, generation, source_head, page_count, row_count,
+              completed_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(ref_name) DO UPDATE SET
+             generation = excluded.generation,
+             source_head = excluded.source_head,
+             page_count = excluded.page_count,
+             row_count = excluded.row_count,
+             completed_at = excluded.completed_at`
+        ).bind(
+          candidate.ref, candidate.generation, candidate.sourceHead,
+          pageNo, rowCount, now
+        ),
+        this.env.DB.prepare(
+          `UPDATE kotobase_compaction_jobs
+              SET status = 'completed', page_count = ?, row_count = ?,
+                  updated_at = ?, completed_at = ?
+            WHERE generation = ?`
+        ).bind(pageNo, rowCount, now, now, candidate.generation)
+      ]);
+      return {
+        ok: true,
+        generation: candidate.generation,
+        ref: candidate.ref,
+        sourceHead: candidate.sourceHead,
+        pageCount: pageNo,
+        rowCount
+      };
+    });
+  }
+}
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -529,6 +744,12 @@ export default {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") {
         const row = await env.DB.prepare("SELECT 1 AS ok").first();
+        const checkpoint = await env.DB.prepare(
+          `SELECT ref_name, source_head, page_count, row_count, completed_at
+             FROM kotobase_canonical_checkpoints
+            ORDER BY completed_at DESC
+            LIMIT 1`
+        ).first();
         return json({
           ok: row?.ok === 1,
           backend: "cloudflare-d1",
@@ -538,7 +759,8 @@ export default {
           routes: Object.keys(CLIENT_API_ROUTES).filter((p) => p.startsWith("/api/")),
           authn: "kotoba-lang/authentication:cacao",
           authz: "kotoba-lang/authorization:deny-by-default",
-          maturity: "client-api-beta"
+          maturity: "client-api-beta",
+          canonicalCheckpoint: checkpoint || null
         });
       }
       if (request.method === "GET" && url.pathname === "/v1/session") {

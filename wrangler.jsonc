@@ -33,5 +33,13 @@
       "migrations_dir": "migrations"
     }
   ],
+  "workflows": [
+    {
+      "name": "kotobase-canonical-compaction",
+      "binding": "CANONICAL_COMPACTION",
+      "class_name": "CanonicalCompactionWorkflow",
+      "schedules": ["7,22,37,52 * * * *"]
+    }
+  ],
   "observability": { "enabled": true }
 }
