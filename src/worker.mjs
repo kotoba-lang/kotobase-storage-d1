@@ -56,8 +56,8 @@ async function nextCompactionCandidate(db) {
   ).first();
 }
 
-async function readCompactionPage(db, ref, cursor) {
-  if (!cursor) {
+async function readCompactionPage(db, ref, generation, pageNo) {
+  if (pageNo === 0) {
     return db.prepare(
       `SELECT e_edn, a_edn, v_edn, tx_cid
          FROM kotobase_datoms_current
@@ -65,6 +65,14 @@ async function readCompactionPage(db, ref, cursor) {
         ORDER BY e_edn, a_edn, v_edn
         LIMIT ?`
     ).bind(ref, COMPACTION_PAGE_SIZE).all();
+  }
+  const cursor = await db.prepare(
+    `SELECT last_e_edn AS e, last_a_edn AS a, last_v_edn AS v
+       FROM kotobase_canonical_checkpoint_pages
+      WHERE ref_name = ? AND generation = ? AND page_no = ?`
+  ).bind(ref, generation, pageNo - 1).first();
+  if (!cursor) {
+    throw new Error(`missing checkpoint cursor for page ${pageNo}`);
   }
   return db.prepare(
     `SELECT e_edn, a_edn, v_edn, tx_cid
@@ -98,11 +106,20 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
       if (!row) return null;
       const generation = crypto.randomUUID();
       const now = Date.now();
-      await this.env.DB.prepare(
-        `INSERT INTO kotobase_compaction_jobs
+      await this.env.DB.batch([
+        this.env.DB.prepare(
+          `UPDATE kotobase_compaction_jobs
+              SET status = 'abandoned',
+                  error = 'superseded by a new workflow instance',
+                  updated_at = ?, completed_at = ?
+            WHERE status = 'running' AND updated_at < ?`
+        ).bind(now, now, now - 15 * 60 * 1000),
+        this.env.DB.prepare(
+          `INSERT INTO kotobase_compaction_jobs
            (generation, ref_name, source_head, status, started_at, updated_at)
          VALUES (?, ?, ?, 'running', ?, ?)`
-      ).bind(generation, row.ref_name, row.head_cid, now, now).run();
+        ).bind(generation, row.ref_name, row.head_cid, now, now)
+      ]);
       return {
         generation,
         ref: row.ref_name,
@@ -111,7 +128,6 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
     });
     if (!candidate) return { ok: true, skipped: "all checkpoints current" };
 
-    let cursor = null;
     let pageNo = 0;
     let rowCount = 0;
     while (true) {
@@ -130,7 +146,7 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
         }
 
         const result = await readCompactionPage(
-          this.env.DB, candidate.ref, cursor
+          this.env.DB, candidate.ref, candidate.generation, pageNo
         );
         const rows = result.results || [];
         if (rows.length === 0) return { done: true };
@@ -162,7 +178,10 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
               WHERE generation = ?`
           ).bind(rows.length, now, candidate.generation)
         ]);
-        return { done: false, cursor: last, rows: rows.length };
+        // Cursor state is persisted in D1 with the page. Returning it from
+        // every Workflow step makes durable instance state grow with the
+        // largest EDN value and eventually stalls long generations.
+        return { done: false, rows: rows.length };
       });
 
       if (page.stale) {
@@ -173,7 +192,6 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
         };
       }
       if (page.done) break;
-      cursor = page.cursor;
       rowCount += page.rows;
       pageNo += 1;
     }
