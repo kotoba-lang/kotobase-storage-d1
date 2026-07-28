@@ -211,6 +211,11 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
       }
 
       const now = Date.now();
+      const previous = await this.env.DB.prepare(
+        `SELECT generation
+           FROM kotobase_canonical_checkpoints
+          WHERE ref_name = ?`
+      ).bind(candidate.ref).first();
       await this.env.DB.batch([
         this.env.DB.prepare(
           `INSERT INTO kotobase_canonical_checkpoints
@@ -234,6 +239,18 @@ export class CanonicalCompactionWorkflow extends WorkflowEntrypoint {
             WHERE generation = ?`
         ).bind(pageNo, rowCount, now, now, candidate.generation)
       ]);
+      const cleanup = previous?.generation
+        ? this.env.DB.prepare(
+            `DELETE FROM kotobase_canonical_checkpoint_pages
+              WHERE ref_name = ?
+                AND generation <> ?
+                AND generation <> ?`
+          ).bind(candidate.ref, candidate.generation, previous.generation)
+        : this.env.DB.prepare(
+            `DELETE FROM kotobase_canonical_checkpoint_pages
+              WHERE ref_name = ? AND generation <> ?`
+          ).bind(candidate.ref, candidate.generation);
+      await cleanup.run();
       return {
         ok: true,
         generation: candidate.generation,
