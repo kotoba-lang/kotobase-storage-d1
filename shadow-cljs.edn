@@ -20,4 +20,13 @@
       foldD1 kotobase.storage.d1-worker/fold-edn!
       viewD1 kotobase.storage.d1-worker/view-edn!}}}
    :compiler-options {:optimizations :advanced
-                      :source-map false}}}}
+                      :source-map false}}
+
+  ;; The storage contract against a real D1 (miniflare/SQLite), including
+  ;; its concurrent half. A node-script rather than a JS harness so the
+  ;; test is written in the same language as the code it tests.
+  :contract-test
+  {:target :node-script
+   :output-to "dist/contract-test.js"
+   :main kotobase.storage.d1-contract-test/-main
+   :compiler-options {:optimizations :none}}}}

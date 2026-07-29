@@ -1,9 +1,16 @@
 import { ed25519 } from "@noble/curves/ed25519";
 import * as dagCbor from "@ipld/dag-cbor";
 import { base58btc } from "multiformats/bases/base58";
+// Sibling checkout under the superproject's `orgs/<org>/<repo>` layout.
+// The org moved (gftdcojp -> network-awai) and this path was not updated,
+// so `npm run verify:remote` could not even be loaded from a fresh
+// checkout. Kept as an import rather than a local copy on purpose:
+// `cacaoSiweMessage` reconstructs the exact bytes the server verifies
+// against, and a second copy of it is a signature bug waiting for the two
+// to drift.
 import {
   cacaoSiweMessage
-} from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
+} from "../../../network-awai/net-kotobase/worker/js/kotobase-core.js";
 
 const endpoint = process.env.KOTOBASE_D1_URL ||
   "https://kotobase-storage-d1.aozora.app";
