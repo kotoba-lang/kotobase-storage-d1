@@ -1,0 +1,28 @@
+name: test
+on: [push, pull_request]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with: { cli: latest }
+      - run: npm ci
+
+      # The storage contract against a real D1 (miniflare/SQLite), race
+      # included, plus an oracle proving the race can still fail on this
+      # backend. This repo previously had no test job at all: its only
+      # verification talked to a deployed endpoint, so `:linearizable-ref`
+      # -- declared since the backend was written, on the plane holding
+      # live traffic -- had never been checked against anything.
+      - run: npm test
+
+      # verify:remote is deliberately NOT run here. It needs a sibling
+      # net-kotobase checkout and a deployed endpoint, neither of which
+      # exists on a runner. Leaving it out is honest; wiring it to a
+      # production URL from CI would not be.
