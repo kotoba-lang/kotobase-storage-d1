@@ -9,6 +9,7 @@
     "verify:remote": "node scripts/verify.mjs",
     "benchmark": "KOTOBASE_BENCH=1 node scripts/verify.mjs",
     "slo:qualify": "node scripts/slo-qualify.mjs",
+    "test:r2-backfill": "node --test test/r2-backfill-worker.test.mjs",
     "test": "shadow-cljs compile contract-test && node dist/contract-test.js"
   },
   "devDependencies": {
