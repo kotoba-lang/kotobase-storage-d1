@@ -21,6 +21,8 @@ No tenant identifiers, ref names, or CIDs are included in this record.
   2026-08-04T06:16:04.155Z.
 - Gateway authority cutover: `fce70115-abd8-431e-b9a4-c60e9207704a`, deployed
   2026-08-04T06:26:43.803Z.
+- Current gateway observability revision: `0b803383-5f01-40ca-9332-5a6b395d1e09`;
+  `/health` explicitly reports `head_authority=r2-etag-cas`.
 - Gateway binding: `KOTOBASE_D1` (stable legacy binding name) ->
   `kotobase-storage-r2-candidate`.
 - Immediate rollback target: service `kotobase-storage-d1`.
