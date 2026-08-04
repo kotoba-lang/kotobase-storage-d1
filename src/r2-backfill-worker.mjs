@@ -96,7 +96,7 @@ async function copyBlockPage(env, stateRecord) {
   const cursorClause = state.block_cursor ? "AND cid > ?" : "";
   const sql = `SELECT cid, byte_length FROM kotobase_blocks
     WHERE created_at >= ? AND created_at <= ? ${cursorClause}
-    ORDER BY cid LIMIT 64`;
+    ORDER BY cid LIMIT 90`;
   const args = state.block_cursor
     ? [state.lower_cutoff, state.cutoff, state.block_cursor]
     : [state.lower_cutoff, state.cutoff];
@@ -266,8 +266,9 @@ async function advance(env) {
       completed_at: null
     });
   }
-  const maxPages = stateRecord.value.repair === "zero-length-d1-blob-conversion"
-    ? 12 : 8;
+  // Four 90-object pages complete comfortably inside the minute-cron wall
+  // budget in production; state is persisted after every page.
+  const maxPages = 4;
   for (let page = 0; page < maxPages && stateRecord.value.phase !== "complete"; page += 1) {
     if (stateRecord.value.phase === "blocks") {
       stateRecord = await copyBlockPage(env, stateRecord);

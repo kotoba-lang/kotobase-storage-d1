@@ -153,6 +153,9 @@ test("a parity-confirmed zero-byte migration is repaired and requalified", async
     await (await bucket.get(`${root}/blocks/cid-a`)).arrayBuffer()
   );
   assert.deepEqual([...repaired], [1, 2]);
+  // The production page budget may yield immediately before the final parity
+  // scan; a subsequent cron must resume and qualify the same durable state.
+  await scheduled(env);
   const health = await (await worker.fetch(new Request("https://example.test/health"), env)).json();
   assert.equal(health.phase, "complete");
   assert.equal(health.parity.pass, true);
