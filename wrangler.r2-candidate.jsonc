@@ -8,12 +8,14 @@
     { "pattern": "candidate-storage.aozora.app", "custom_domain": true }
   ],
   "observability": { "enabled": true },
+  "limits": { "cpu_ms": 300000 },
   "triggers": { "crons": ["* * * * *"] },
   "build": { "command": "npx shadow-cljs release engine r2-engine" },
   "vars": {
     "KOTOBASE_AUTHORITY": "r2",
     "KOTOBASE_R2_NAMESPACE": "production",
     "KOTOBASE_R2_PARITY": "1",
+    "KOTOBASE_R2_PARITY_MAX_DATOMS": "10000",
     "KOTOBASE_R2_GC": "0",
     "KOTOBASE_R2_GRACE_SECONDS": "86400"
   },

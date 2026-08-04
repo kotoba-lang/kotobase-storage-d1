@@ -266,7 +266,14 @@
                (some? since) (d/since (d/db canonical) since)
                history (d/history (d/db canonical))
                :else canonical)]
-    (edn-promise (apply d/q query view (or args [])))))
+    (if (or (some? as-of) (some? since) history)
+      (edn-promise (apply d/q query view (or args [])))
+      (-> (projection/fast-q! db ref-name query (or args []))
+          (.then
+           (fn [{:keys [used? value]}]
+             (if used?
+               (pr-str value)
+               (edn-promise (apply d/q canonical query (or args []))))))))))
 
 (defn ^:export pull-edn! [db bucket namespace ref-name source]
   (let [{:keys [selector eid as-of since history]} (read-edn source)
@@ -276,7 +283,14 @@
                (some? since) (d/since (d/db canonical) since)
                history (d/history (d/db canonical))
                :else canonical)]
-    (edn-promise (d/pull view selector eid))))
+    (if (or (some? as-of) (some? since) history)
+      (edn-promise (d/pull view selector eid))
+      (-> (projection/fast-pull! db ref-name selector eid)
+          (.then
+           (fn [{:keys [used? value]}]
+             (if used?
+               (pr-str value)
+               (edn-promise (d/pull canonical selector eid)))))))))
 
 (defn ^:export datoms-edn! [db bucket namespace ref-name source]
   (let [{:keys [as-of since history] :as options} (read-edn source)
@@ -286,7 +300,15 @@
                (some? since) (d/since (d/db canonical) since)
                history (d/history (d/db canonical))
                :else canonical)]
-    (edn-promise (d/datoms view (dissoc options :as-of :since :history)))))
+    (let [datom-options (dissoc options :as-of :since :history)]
+      (if (or (some? as-of) (some? since) history)
+        (edn-promise (d/datoms view datom-options))
+        (-> (projection/fast-datoms! db ref-name datom-options)
+            (.then
+             (fn [{:keys [used? value]}]
+               (if used?
+                 (pr-str value)
+                 (edn-promise (d/datoms canonical datom-options))))))))))
 
 (defn ^:export fold-edn! [db bucket namespace ref-name source]
   (edn-promise (d/fold (database db bucket namespace ref-name) (read-edn source))))

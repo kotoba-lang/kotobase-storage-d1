@@ -37,6 +37,11 @@ function parityStateKey(env) {
   return `kotobase/datomic/v2/${namespace}/canonical/migration/semantic-parity-state.json`;
 }
 
+function canonicalRefKey(env, ref) {
+  const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
+  return `kotobase/datomic/v2/${namespace}/canonical/refs/${encodeURIComponent(ref)}`;
+}
+
 async function rollbackMirrorStatus(env) {
   const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
   const page = await env.KOTOBASE_CANONICAL_R2.list({
@@ -48,15 +53,20 @@ async function rollbackMirrorStatus(env) {
 
 async function readParityState(env) {
   const object = await env.KOTOBASE_CANONICAL_R2.get(parityStateKey(env));
-  return object ? JSON.parse(await object.text()) : {
-    version: 1, phase: "running", cursor: null,
-    checked: 0, matched: 0, failed: 0, projection_skipped: 0,
-    latency_ms: [], started_at: Date.now()
+  return object ? { etag: object.etag, value: JSON.parse(await object.text()) } : {
+    etag: null,
+    value: {
+      version: 1, phase: "running", cursor: null,
+      checked: 0, matched: 0, failed: 0, projection_skipped: 0,
+      large_projection_qualified: 0,
+      latency_ms: [], started_at: Date.now()
+    }
   };
 }
 
 async function advanceSemanticParity(env) {
-  const state = await readParityState(env);
+  const stateRecord = await readParityState(env);
+  const state = stateRecord.value;
   if (state.phase === "complete" || state.phase === "failed") return state;
   const row = state.cursor
     ? await env.DB.prepare(
@@ -98,19 +108,27 @@ async function advanceSemanticParity(env) {
   } else {
     const startedAt = performance.now();
     let candidate;
+    const largeProjection = Number(row.datom_count) >
+      Number(env.KOTOBASE_R2_PARITY_MAX_DATOMS || 10000);
     try {
-      candidate = await parityR2(
-        env.DB, env.KOTOBASE_CANONICAL_R2,
-        String(env.KOTOBASE_R2_NAMESPACE || "production"), row.name
-      );
+      if (largeProjection) {
+        const object = await env.KOTOBASE_CANONICAL_R2.get(canonicalRefKey(env, row.name));
+        candidate = object ? { head: JSON.parse(await object.text()).cid } : null;
+      } else {
+        candidate = await parityR2(
+          env.DB, env.KOTOBASE_CANONICAL_R2,
+          String(env.KOTOBASE_R2_NAMESPACE || "production"), row.name
+        );
+      }
     } catch (_error) {
       candidate = null;
     }
     const latencyMs = Math.round((performance.now() - startedAt) * 10) / 10;
     const headMatch = candidate?.head === row.cid;
     const projected = row.projection_head === row.cid;
-    const countMatch = candidate &&
-      (!projected || Number(candidate.datomCount) === Number(row.datom_count));
+    const countMatch = candidate && (largeProjection
+      ? projected
+      : (!projected || Number(candidate.datomCount) === Number(row.datom_count)));
     const match = headMatch && countMatch;
     next = {
       ...state,
@@ -119,14 +137,20 @@ async function advanceSemanticParity(env) {
       matched: state.matched + (match ? 1 : 0),
       failed: state.failed + (match ? 0 : 1),
       projection_skipped: state.projection_skipped + (projected ? 0 : 1),
+      large_projection_qualified: (state.large_projection_qualified || 0) +
+        (largeProjection && match ? 1 : 0),
       latency_ms: [...(state.latency_ms || []), latencyMs],
       updated_at: Date.now()
     };
   }
-  await env.KOTOBASE_CANONICAL_R2.put(
-    parityStateKey(env), textEncoder.encode(JSON.stringify(next))
+  const written = await env.KOTOBASE_CANONICAL_R2.put(
+    parityStateKey(env), textEncoder.encode(JSON.stringify(next)), {
+      onlyIf: stateRecord.etag
+        ? { etagMatches: stateRecord.etag }
+        : { etagDoesNotMatch: "*" }
+    }
   );
-  return next;
+  return written ? next : (await readParityState(env)).value;
 }
 
 function json(body, status = 200) {
@@ -655,15 +679,17 @@ export default {
         let r2Parity = null;
         if (r2Authority(env)) {
           try {
-            const [state, rollbackMirror] = await Promise.all([
+            const [stateRecord, rollbackMirror] = await Promise.all([
               readParityState(env), rollbackMirrorStatus(env)
             ]);
+            const state = stateRecord.value;
             r2Parity = {
               phase: state.phase,
               checked: state.checked,
               matched: state.matched,
               failed: state.failed,
               projection_skipped: state.projection_skipped,
+              large_projection_qualified: state.large_projection_qualified || 0,
               latency: state.latency || null,
               pass: state.pass ?? null,
               rollback_mirror_ready: rollbackMirror.ready
@@ -751,7 +777,8 @@ export default {
         checked: state.checked,
         matched: state.matched,
         failed: state.failed,
-        projection_skipped: state.projection_skipped
+        projection_skipped: state.projection_skipped,
+        large_projection_qualified: state.large_projection_qualified || 0
       }));
     }));
   }
