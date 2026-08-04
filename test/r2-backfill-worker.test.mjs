@@ -40,7 +40,7 @@ class Bucket {
 class Database {
   constructor() {
     this.blocks = [
-      { cid: "cid-a", bytes: new Uint8Array([1, 2]), byte_length: 2, created_at: 0 },
+      { cid: "cid-a", bytes: [1, 2], byte_length: 2, created_at: 0 },
       { cid: "cid-b", bytes: new Uint8Array([3]), byte_length: 1, created_at: 0 }
     ];
     this.refs = [{ name: "kotobase/db/did:key:z/ref", cid: "cid-b", revision: 2, updated_at: 1 }];

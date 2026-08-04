@@ -58,14 +58,35 @@ function sameBytes(left, right) {
     left.every((value, index) => value === right[index]);
 }
 
-async function putImmutable(env, cid, bytes) {
+function blobBytes(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  throw new Error("unsupported D1 BLOB representation");
+}
+
+async function putImmutable(env, cid, bytes, repairZeroObjects = false) {
   const key = blockKey(env, cid);
+  if (repairZeroObjects) {
+    await env.KOTOBASE_CANONICAL_R2.put(key, bytes);
+    return;
+  }
   const created = await env.KOTOBASE_CANONICAL_R2.put(key, bytes, {
     onlyIf: { etagDoesNotMatch: "*" }
   });
   if (created) return;
   const existing = await env.KOTOBASE_CANONICAL_R2.get(key);
-  if (!existing || !sameBytes(new Uint8Array(await existing.arrayBuffer()), bytes)) {
+  if (!existing) throw new Error("R2 immutable CID collision");
+  const stored = new Uint8Array(await existing.arrayBuffer());
+  if (stored.byteLength === 0 && bytes.byteLength > 0 &&
+      String(env.KOTOBASE_R2_REPAIR_ZERO_OBJECTS || "0") === "1") {
+    await env.KOTOBASE_CANONICAL_R2.put(key, bytes);
+    const repaired = await env.KOTOBASE_CANONICAL_R2.get(key);
+    if (repaired && sameBytes(new Uint8Array(await repaired.arrayBuffer()), bytes)) return;
+  }
+  if (!sameBytes(stored, bytes)) {
     throw new Error("R2 immutable CID collision");
   }
 }
@@ -92,10 +113,8 @@ async function copyBlockPage(env, stateRecord) {
       WHERE cid IN (${selected.map(() => "?").join(",")}) ORDER BY cid`
   ).bind(...selected.map((row) => row.cid)).all()).results || [];
   await Promise.all(rows.map((row) => {
-    const bytes = row.bytes instanceof ArrayBuffer
-      ? new Uint8Array(row.bytes)
-      : new Uint8Array(row.bytes.buffer, row.bytes.byteOffset, row.bytes.byteLength);
-    return putImmutable(env, row.cid, bytes);
+    return putImmutable(env, row.cid, blobBytes(row.bytes),
+      state.repair === "zero-length-d1-blob-conversion");
   }));
   const next = rows.length === 0
     ? { ...state, phase: "refs", block_cursor: null, ref_cursor: null }
@@ -216,6 +235,24 @@ async function verifyParity(env, stateRecord) {
 
 async function advance(env) {
   let stateRecord = await getState(env);
+  if (stateRecord.value.phase === "parity-failed" &&
+      stateRecord.value.parity?.r2_block_bytes === 0 &&
+      String(env.KOTOBASE_R2_REPAIR_ZERO_OBJECTS || "0") === "1") {
+    stateRecord = await putState(env, stateRecord.etag, {
+      ...stateRecord.value,
+      phase: "blocks",
+      cycle: stateRecord.value.cycle + 1,
+      lower_cutoff: -1,
+      cutoff: Date.now(),
+      block_cursor: null,
+      ref_cursor: null,
+      copied_blocks: 0,
+      copied_refs: 0,
+      parity: null,
+      completed_at: null,
+      repair: "zero-length-d1-blob-conversion"
+    });
+  }
   if (stateRecord.value.phase === "complete") {
     stateRecord = await putState(env, stateRecord.etag, {
       ...stateRecord.value,
@@ -228,7 +265,9 @@ async function advance(env) {
       completed_at: null
     });
   }
-  for (let page = 0; page < 8 && stateRecord.value.phase !== "complete"; page += 1) {
+  const maxPages = stateRecord.value.repair === "zero-length-d1-blob-conversion"
+    ? 12 : 8;
+  for (let page = 0; page < maxPages && stateRecord.value.phase !== "complete"; page += 1) {
     if (stateRecord.value.phase === "blocks") {
       stateRecord = await copyBlockPage(env, stateRecord);
     } else if (stateRecord.value.phase === "refs") {

@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "build": "shadow-cljs release engine",
+    "build": "shadow-cljs release engine r2-engine",
     "check": "shadow-cljs compile engine",
     "deploy": "npm run build && wrangler deploy",
     "dev": "npm run build && wrangler dev",
@@ -10,6 +10,8 @@
     "benchmark": "KOTOBASE_BENCH=1 node scripts/verify.mjs",
     "slo:qualify": "node scripts/slo-qualify.mjs",
     "test:r2-backfill": "node --test test/r2-backfill-worker.test.mjs",
+    "test:core": "node --test test/kotobase-core.test.mjs",
+    "test:r2-authority": "shadow-cljs compile r2-contract-test && node dist/r2-contract-test.js",
     "test": "shadow-cljs compile contract-test && node dist/contract-test.js"
   },
   "devDependencies": {
