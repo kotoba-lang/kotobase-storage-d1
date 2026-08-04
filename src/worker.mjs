@@ -37,6 +37,15 @@ function parityStateKey(env) {
   return `kotobase/datomic/v2/${namespace}/canonical/migration/semantic-parity-state.json`;
 }
 
+async function rollbackMirrorStatus(env) {
+  const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
+  const page = await env.KOTOBASE_CANONICAL_R2.list({
+    prefix: `kotobase/datomic/v2/${namespace}/canonical/rollback-mirror-pending/`,
+    limit: 1
+  });
+  return { ready: (page.objects || []).length === 0 };
+}
+
 async function readParityState(env) {
   const object = await env.KOTOBASE_CANONICAL_R2.get(parityStateKey(env));
   return object ? JSON.parse(await object.text()) : {
@@ -646,7 +655,9 @@ export default {
         let r2Parity = null;
         if (r2Authority(env)) {
           try {
-            const state = await readParityState(env);
+            const [state, rollbackMirror] = await Promise.all([
+              readParityState(env), rollbackMirrorStatus(env)
+            ]);
             r2Parity = {
               phase: state.phase,
               checked: state.checked,
@@ -654,7 +665,8 @@ export default {
               failed: state.failed,
               projection_skipped: state.projection_skipped,
               latency: state.latency || null,
-              pass: state.pass ?? null
+              pass: state.pass ?? null,
+              rollback_mirror_ready: rollbackMirror.ready
             };
           } catch (_error) {
             r2Parity = { phase: "unavailable", degraded: true };

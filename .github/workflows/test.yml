@@ -26,3 +26,13 @@ jobs:
       # net-kotobase checkout and a deployed endpoint, neither of which
       # exists on a runner. Leaving it out is honest; wiring it to a
       # production URL from CI would not be.
+
+  r2-candidate-multiregion:
+    if: github.ref == 'refs/heads/agent/r2-merkle-lsm-authority-260804'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+      - run: npm run slo:r2-qualify

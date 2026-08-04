@@ -29,6 +29,10 @@
 (defn- ref-key [namespace ref-name]
   (str (prefix namespace) "/refs/" (js/encodeURIComponent ref-name)))
 
+(defn- mirror-marker-key [namespace ref-name]
+  (str (prefix namespace) "/rollback-mirror-pending/"
+       (js/encodeURIComponent ref-name)))
+
 (defn- bytes= [left right]
   (let [left (js/Uint8Array. left)
         right (js/Uint8Array. right)]
@@ -55,6 +59,59 @@
 (defn- prepared [db sql params]
   (let [statement (invoke db "prepare" sql)]
     (.apply (gobj/get statement "bind") statement (to-array params))))
+
+(defn- mirror-current? [db ref-name head]
+  (-> (invoke
+       (prepared
+        db
+        "SELECT r.cid, p.head_cid AS projection_head
+           FROM kotobase_refs r
+           LEFT JOIN kotobase_projection p ON p.ref_name = r.name
+          WHERE r.name = ?"
+        [ref-name])
+       "first")
+      (.then
+       (fn [row]
+         (and row
+              (= head (gobj/get row "cid"))
+              (= head (gobj/get row "projection_head")))))))
+
+(defn- mirror-after-r2! [db bucket namespace ref-name expected head plan report]
+  (let [marker (mirror-marker-key namespace ref-name)]
+    (letfn [(attempt [remaining]
+              (-> (projection/projected-cas! db ref-name expected head plan)
+                  (.then
+                   (fn [{:keys [published?]}]
+                     (if published?
+                       true
+                       (mirror-current? db ref-name head))))
+                  (.catch (fn [_] false))
+                  (.then
+                   (fn [mirrored?]
+                     (cond
+                       mirrored?
+                       ;; A pending marker denotes a historical rollback gap
+                       ;; and is cleared only by an explicit repair drill.
+                       ;; The ordinary success path therefore performs no
+                       ;; extra Class-A delete on every transaction.
+                       (js/Promise.resolve report)
+
+                       (pos? remaining)
+                       (attempt (dec remaining))
+
+                       :else
+                       (let [body (.encode
+                                   (js/TextEncoder.)
+                                   (js/JSON.stringify
+                                    #js {:version 1 :ref ref-name
+                                         :expected expected :head head
+                                         :detected_at (.now js/Date)}))]
+                         (-> (invoke bucket "put" marker body)
+                             ;; R2 is already authoritative. Preserve the
+                             ;; successful transaction, but make rollback
+                             ;; fail closed through the health gate.
+                             (.then (fn [_] report)))))))))]
+      (attempt 2))))
 
 (defn- bytes-buffer [bytes]
   (let [buffer (.-buffer bytes)
@@ -269,10 +326,7 @@
            (-> (d/transact-prepared canonical prepared)
                (.then
                 (fn [report]
-                  (-> (projection/projected-cas!
-                       db ref-name (:db-before report) (:db-after report) plan)
-                      ;; R2 already won its CAS. A projection outage must not
-                      ;; turn the committed write into a client retry.
-                      (.catch (fn [_] nil))
-                      (.then (fn [_] report))))))))
+                  (mirror-after-r2!
+                   db bucket namespace ref-name
+                   (:db-before report) (:db-after report) plan report))))))
         (.then pr-str))))
