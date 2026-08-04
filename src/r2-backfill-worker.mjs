@@ -195,6 +195,7 @@ async function r2BlockInventory(env) {
 
 async function verifyParity(env, stateRecord) {
   const { value: state } = stateRecord;
+  const checkedAt = Date.now();
   const sourceBlocks = await env.DB.prepare(
     `SELECT COUNT(*) AS count, COALESCE(SUM(byte_length), 0) AS bytes
        FROM kotobase_blocks WHERE created_at <= ?`
@@ -215,7 +216,7 @@ async function verifyParity(env, stateRecord) {
     }
   }
   const parity = {
-    checked_at: Date.now(),
+    checked_at: checkedAt,
     source_blocks: Number(sourceBlocks.count),
     source_block_bytes: Number(sourceBlocks.bytes),
     r2_blocks: r2Blocks.count,
@@ -230,7 +231,9 @@ async function verifyParity(env, stateRecord) {
     ...state,
     phase: parity.pass ? "complete" : "parity-failed",
     parity,
-    completed_at: parity.pass ? Date.now() : null
+    completed_at: parity.pass ? checkedAt : null,
+    repaired_at: parity.pass && state.repair ? checkedAt : state.repaired_at,
+    repair: parity.pass ? null : state.repair
   });
 }
 

@@ -159,4 +159,7 @@ test("a parity-confirmed zero-byte migration is repaired and requalified", async
   const health = await (await worker.fetch(new Request("https://example.test/health"), env)).json();
   assert.equal(health.phase, "complete");
   assert.equal(health.parity.pass, true);
+  const state = JSON.parse(await (await bucket.get(`${root}/migration/backfill-state.json`)).text());
+  assert.equal(state.repair, null);
+  assert.equal(typeof state.repaired_at, "number");
 });
