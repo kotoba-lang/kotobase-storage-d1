@@ -42,7 +42,7 @@ async function readParityState(env) {
   return object ? JSON.parse(await object.text()) : {
     version: 1, phase: "running", cursor: null,
     checked: 0, matched: 0, failed: 0, projection_skipped: 0,
-    started_at: Date.now()
+    latency_ms: [], started_at: Date.now()
   };
 }
 
@@ -55,6 +55,7 @@ async function advanceSemanticParity(env) {
                 (SELECT COUNT(*) FROM kotobase_datoms_current d
                   WHERE d.ref_name = r.name) AS datom_count
            FROM kotobase_refs r
+           JOIN kotobase_graph_cid_index g ON g.ref_name = r.name
            LEFT JOIN kotobase_projection p ON p.ref_name = r.name
           WHERE r.name > ? ORDER BY r.name LIMIT 1`
       ).bind(state.cursor).first()
@@ -63,26 +64,44 @@ async function advanceSemanticParity(env) {
                 (SELECT COUNT(*) FROM kotobase_datoms_current d
                   WHERE d.ref_name = r.name) AS datom_count
            FROM kotobase_refs r
+           JOIN kotobase_graph_cid_index g ON g.ref_name = r.name
            LEFT JOIN kotobase_projection p ON p.ref_name = r.name
           ORDER BY r.name LIMIT 1`
       ).first();
   let next;
   if (!row) {
+    const sorted = [...(state.latency_ms || [])].sort((a, b) => a - b);
+    const percentile = (p) => sorted.length === 0 ? null
+      : sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)];
     next = {
       ...state,
       phase: state.failed === 0 ? "complete" : "failed",
       cursor: null,
       completed_at: Date.now(),
-      pass: state.failed === 0
+      pass: state.failed === 0,
+      latency: {
+        samples: sorted.length,
+        p50_ms: percentile(0.50),
+        p95_ms: percentile(0.95),
+        p99_ms: percentile(0.99)
+      }
     };
   } else {
-    const candidate = await parityR2(
-      env.DB, env.KOTOBASE_CANONICAL_R2,
-      String(env.KOTOBASE_R2_NAMESPACE || "production"), row.name
-    );
-    const headMatch = candidate.head === row.cid;
+    const startedAt = performance.now();
+    let candidate;
+    try {
+      candidate = await parityR2(
+        env.DB, env.KOTOBASE_CANONICAL_R2,
+        String(env.KOTOBASE_R2_NAMESPACE || "production"), row.name
+      );
+    } catch (_error) {
+      candidate = null;
+    }
+    const latencyMs = Math.round((performance.now() - startedAt) * 10) / 10;
+    const headMatch = candidate?.head === row.cid;
     const projected = row.projection_head === row.cid;
-    const countMatch = !projected || Number(candidate.datomCount) === Number(row.datom_count);
+    const countMatch = candidate &&
+      (!projected || Number(candidate.datomCount) === Number(row.datom_count));
     const match = headMatch && countMatch;
     next = {
       ...state,
@@ -91,6 +110,7 @@ async function advanceSemanticParity(env) {
       matched: state.matched + (match ? 1 : 0),
       failed: state.failed + (match ? 0 : 1),
       projection_skipped: state.projection_skipped + (projected ? 0 : 1),
+      latency_ms: [...(state.latency_ms || []), latencyMs],
       updated_at: Date.now()
     };
   }
@@ -623,6 +643,23 @@ export default {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") {
         const row = await env.DB.prepare("SELECT 1 AS ok").first();
+        let r2Parity = null;
+        if (r2Authority(env)) {
+          try {
+            const state = await readParityState(env);
+            r2Parity = {
+              phase: state.phase,
+              checked: state.checked,
+              matched: state.matched,
+              failed: state.failed,
+              projection_skipped: state.projection_skipped,
+              latency: state.latency || null,
+              pass: state.pass ?? null
+            };
+          } catch (_error) {
+            r2Parity = { phase: "unavailable", degraded: true };
+          }
+        }
         return json({
           ok: row?.ok === 1,
           backend: r2Authority(env) ? "cloudflare-r2" : "cloudflare-d1",
@@ -633,7 +670,8 @@ export default {
           routes: Object.keys(CLIENT_API_ROUTES).filter((p) => p.startsWith("/api/")),
           authn: "kotoba-lang/authentication:cacao",
           authz: "kotoba-lang/authorization:deny-by-default",
-          maturity: "client-api-beta"
+          maturity: "client-api-beta",
+          r2_parity: r2Parity
         });
       }
       if (request.method === "GET" && url.pathname === "/v1/session") {
@@ -643,6 +681,9 @@ export default {
       const authn = await authenticate(request, env);
       if (authn.error) return authn.error;
       if (request.method === "POST" && url.pathname === "/v1/commit") {
+        if (r2Authority(env)) {
+          return json({ ok: false, error: "LegacyCommitDisabled" }, 404);
+        }
         return commit(request, env, authn);
       }
       if (request.method === "GET" && url.pathname === "/v1/ref") {
@@ -687,7 +728,12 @@ export default {
 
   async scheduled(_event, env, ctx) {
     if (!r2Authority(env) || String(env.KOTOBASE_R2_PARITY || "0") !== "1") return;
-    ctx.waitUntil(advanceSemanticParity(env).then((state) => {
+    const work = Array.from({ length: 4 }).reduce(
+      (promise) => promise.then((state) =>
+        !state || state.phase === "running" ? advanceSemanticParity(env) : state),
+      Promise.resolve(null)
+    );
+    ctx.waitUntil(work.then((state) => {
       console.log("R2 semantic parity", JSON.stringify({
         phase: state.phase,
         checked: state.checked,

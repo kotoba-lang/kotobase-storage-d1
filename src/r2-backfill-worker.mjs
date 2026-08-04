@@ -104,7 +104,8 @@ async function copyBlockPage(env, stateRecord) {
   let totalBytes = 0;
   const selected = [];
   for (const row of candidates) {
-    if (selected.length > 0 && totalBytes + row.byte_length > 4194304) break;
+    // Stay below D1's 10 MiB result ceiling while amortizing large blocks.
+    if (selected.length > 0 && totalBytes + row.byte_length > 7340032) break;
     selected.push(row);
     totalBytes += row.byte_length;
   }

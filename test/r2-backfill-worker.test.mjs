@@ -123,3 +123,37 @@ test("health fails closed without exposing migration state errors", async () => 
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { ok: false, authority: "d1", degraded: true });
 });
+
+test("a parity-confirmed zero-byte migration is repaired and requalified", async () => {
+  const bucket = new Bucket();
+  const env = {
+    DB: new Database(),
+    KOTOBASE_CANONICAL_R2: bucket,
+    KOTOBASE_R2_NAMESPACE: "repair",
+    KOTOBASE_R2_REPAIR_ZERO_OBJECTS: "1"
+  };
+  const root = "kotobase/datomic/v2/repair/canonical";
+  for (const row of env.DB.blocks) {
+    await bucket.put(`${root}/blocks/${row.cid}`, new Uint8Array());
+  }
+  await bucket.put(`${root}/migration/backfill-state.json`, new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    phase: "parity-failed",
+    cycle: 1,
+    lower_cutoff: -1,
+    cutoff: Date.now(),
+    block_cursor: null,
+    ref_cursor: null,
+    copied_blocks: 2,
+    copied_refs: 1,
+    parity: { r2_block_bytes: 0, pass: false }
+  })));
+  await scheduled(env);
+  const repaired = new Uint8Array(
+    await (await bucket.get(`${root}/blocks/cid-a`)).arrayBuffer()
+  );
+  assert.deepEqual([...repaired], [1, 2]);
+  const health = await (await worker.fetch(new Request("https://example.test/health"), env)).json();
+  assert.equal(health.phase, "complete");
+  assert.equal(health.parity.pass, true);
+});

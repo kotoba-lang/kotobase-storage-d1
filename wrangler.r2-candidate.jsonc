@@ -4,6 +4,9 @@
   "main": "src/worker.mjs",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
+  "routes": [
+    { "pattern": "candidate-storage.aozora.app", "custom_domain": true }
+  ],
   "observability": { "enabled": true },
   "triggers": { "crons": ["* * * * *"] },
   "build": { "command": "npx shadow-cljs release engine r2-engine" },
