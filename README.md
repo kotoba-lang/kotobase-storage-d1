@@ -2,6 +2,14 @@
 
 Cloudflare D1 storage adapter and Datomic-shaped Worker deployment.
 
+> Production status (2026-08-14): the D1 deployment reached its 10 GB hard
+> limit and was retired. `kotobase-storage-d1.aozora.app` is now a narrow
+> compatibility proxy: `/xrpc/*` streams to `https://kotobase.net`, whose
+> graph engine persists through its R2 binding; legacy `/v1/*` and `/api/*`
+> return `410 D1Retired`. The D1 database remains intact as a rollback/export
+> source but is no longer bound to the Worker, so requests cannot accrue D1
+> row-read or row-write charges.
+
 D1 is SQLite-backed and is not PostgreSQL. This repository validates the same
 Kotobase immutable-block/mutable-ref semantics on D1, with real signed CACAO
 authentication and deny-by-default tenant/capability authorization.
