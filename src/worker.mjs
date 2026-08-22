@@ -3,15 +3,155 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { base58btc } from "multiformats/bases/base58";
 import {
   cacaoSiweMessage, graphCidFromName, looksLikeGraphCid
-} from "../../../gftdcojp/net-kotobase/worker/js/kotobase-core.js";
+} from "./kotobase-core.mjs";
 import {
   headD1, basisD1, txRangeD1, listenerD1, adminD1,
   transactD1, reindexD1, qD1, pullD1, datomsD1, foldD1, viewD1
 } from "../dist/kotobase-engine.js";
+import {
+  headR2, basisR2, transactR2, qR2, pullR2, datomsR2, foldR2, viewR2,
+  parityR2
+} from "../dist/kotobase-r2-engine.js";
 
 const TX_CAPABILITY = "kotoba://can/datom:transact";
 const READ_CAPABILITY = "kotoba://can/graph:query";
 const textEncoder = new TextEncoder();
+
+function r2Authority(env) {
+  return String(env.KOTOBASE_AUTHORITY || "d1").trim().toLowerCase() === "r2";
+}
+
+function storageInvoke(env, d1Invoke, r2Invoke) {
+  if (!r2Authority(env)) return d1Invoke;
+  if (!r2Invoke || !env.KOTOBASE_CANONICAL_R2) {
+    return () => Promise.reject(new Error("R2 authority route unavailable"));
+  }
+  const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
+  return (db, ref, source) => r2Invoke(
+    db, env.KOTOBASE_CANONICAL_R2, namespace, ref, source
+  );
+}
+
+function parityStateKey(env) {
+  const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
+  return `kotobase/datomic/v2/${namespace}/canonical/migration/semantic-parity-state.json`;
+}
+
+function canonicalRefKey(env, ref) {
+  const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
+  return `kotobase/datomic/v2/${namespace}/canonical/refs/${encodeURIComponent(ref)}`;
+}
+
+async function rollbackMirrorStatus(env) {
+  const namespace = String(env.KOTOBASE_R2_NAMESPACE || "production");
+  const page = await env.KOTOBASE_CANONICAL_R2.list({
+    prefix: `kotobase/datomic/v2/${namespace}/canonical/rollback-mirror-pending/`,
+    limit: 1
+  });
+  return { ready: (page.objects || []).length === 0 };
+}
+
+async function readParityState(env) {
+  const object = await env.KOTOBASE_CANONICAL_R2.get(parityStateKey(env));
+  return object ? { etag: object.etag, value: JSON.parse(await object.text()) } : {
+    etag: null,
+    value: {
+      version: 1, phase: "running", cursor: null,
+      checked: 0, matched: 0, failed: 0, projection_skipped: 0,
+      large_projection_qualified: 0,
+      latency_ms: [], started_at: Date.now()
+    }
+  };
+}
+
+async function advanceSemanticParity(env) {
+  const stateRecord = await readParityState(env);
+  const state = stateRecord.value;
+  if (state.phase === "complete" || state.phase === "failed") return state;
+  const row = state.cursor
+    ? await env.DB.prepare(
+        `SELECT r.name, r.cid, p.head_cid AS projection_head,
+                (SELECT COUNT(*) FROM kotobase_datoms_current d
+                  WHERE d.ref_name = r.name) AS datom_count
+           FROM kotobase_refs r
+           JOIN kotobase_graph_cid_index g ON g.ref_name = r.name
+           LEFT JOIN kotobase_projection p ON p.ref_name = r.name
+          WHERE r.name > ? ORDER BY r.name LIMIT 1`
+      ).bind(state.cursor).first()
+    : await env.DB.prepare(
+        `SELECT r.name, r.cid, p.head_cid AS projection_head,
+                (SELECT COUNT(*) FROM kotobase_datoms_current d
+                  WHERE d.ref_name = r.name) AS datom_count
+           FROM kotobase_refs r
+           JOIN kotobase_graph_cid_index g ON g.ref_name = r.name
+           LEFT JOIN kotobase_projection p ON p.ref_name = r.name
+          ORDER BY r.name LIMIT 1`
+      ).first();
+  let next;
+  if (!row) {
+    const sorted = [...(state.latency_ms || [])].sort((a, b) => a - b);
+    const percentile = (p) => sorted.length === 0 ? null
+      : sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)];
+    next = {
+      ...state,
+      phase: state.failed === 0 ? "complete" : "failed",
+      cursor: null,
+      completed_at: Date.now(),
+      pass: state.failed === 0,
+      latency: {
+        samples: sorted.length,
+        p50_ms: percentile(0.50),
+        p95_ms: percentile(0.95),
+        p99_ms: percentile(0.99)
+      }
+    };
+  } else {
+    const startedAt = performance.now();
+    let candidate;
+    const largeProjection = Number(row.datom_count) >
+      Number(env.KOTOBASE_R2_PARITY_MAX_DATOMS || 10000);
+    try {
+      if (largeProjection) {
+        const object = await env.KOTOBASE_CANONICAL_R2.get(canonicalRefKey(env, row.name));
+        candidate = object ? { head: JSON.parse(await object.text()).cid } : null;
+      } else {
+        candidate = await parityR2(
+          env.DB, env.KOTOBASE_CANONICAL_R2,
+          String(env.KOTOBASE_R2_NAMESPACE || "production"), row.name
+        );
+      }
+    } catch (_error) {
+      candidate = null;
+    }
+    const latencyMs = Math.round((performance.now() - startedAt) * 10) / 10;
+    const headMatch = candidate?.head === row.cid;
+    const projected = row.projection_head === row.cid;
+    const countMatch = candidate && (largeProjection
+      ? projected
+      : (!projected || Number(candidate.datomCount) === Number(row.datom_count)));
+    const match = headMatch && countMatch;
+    next = {
+      ...state,
+      cursor: row.name,
+      checked: state.checked + 1,
+      matched: state.matched + (match ? 1 : 0),
+      failed: state.failed + (match ? 0 : 1),
+      projection_skipped: state.projection_skipped + (projected ? 0 : 1),
+      large_projection_qualified: (state.large_projection_qualified || 0) +
+        (largeProjection && match ? 1 : 0),
+      latency_ms: [...(state.latency_ms || []), latencyMs],
+      updated_at: Date.now()
+    };
+  }
+  const written = await env.KOTOBASE_CANONICAL_R2.put(
+    parityStateKey(env), textEncoder.encode(JSON.stringify(next)), {
+      onlyIf: stateRecord.etag
+        ? { etagMatches: stateRecord.etag }
+        : { etagDoesNotMatch: "*" }
+    }
+  );
+  return written ? next : (await readParityState(env)).value;
+}
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -508,22 +648,22 @@ async function datomicRequest(
  */
 // dead helper removed — databaseRef() handles Client API db-name headers
 const CLIENT_API_ROUTES = {
-  "/api/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: (db, ref, source) => transactD1(db, ref, source), recordAlias: true, clientApi: true },
-  "/api/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: (db, ref, source) => qD1(db, ref, source), clientApi: true },
-  "/api/qseq": { method: "POST", capability: READ_CAPABILITY, action: "datomic/qseq", invoke: (db, ref, source) => qD1(db, ref, source), clientApi: true },
-  "/api/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: (db, ref, source) => pullD1(db, ref, source), clientApi: true },
-  "/api/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: (db, ref, source) => datomsD1(db, ref, source), clientApi: true },
+  "/api/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: transactD1, r2Invoke: transactR2, recordAlias: true, clientApi: true },
+  "/api/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: qD1, r2Invoke: qR2, clientApi: true },
+  "/api/qseq": { method: "POST", capability: READ_CAPABILITY, action: "datomic/qseq", invoke: qD1, r2Invoke: qR2, clientApi: true },
+  "/api/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: pullD1, r2Invoke: pullR2, clientApi: true },
+  "/api/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: datomsD1, r2Invoke: datomsR2, clientApi: true },
   "/api/tx-range": { method: "POST", capability: READ_CAPABILITY, action: "datomic/tx-range", invoke: (db, ref, source) => txRangeD1(db, ref, source), clientApi: true },
   "/api/db": { method: "POST", capability: READ_CAPABILITY, action: "datomic/db", invoke: (db, ref, source) => basisD1(db, ref, source), clientApi: true },
   "/api/with": { method: "POST", capability: READ_CAPABILITY, action: "datomic/with", invoke: (db, ref, source) => transactD1(db, ref, source), clientApi: true },
   // Legacy aliases — same handlers, not XRPC
-  "/v1/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: (db, ref, source) => transactD1(db, ref, source), recordAlias: true },
+  "/v1/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: transactD1, r2Invoke: transactR2, recordAlias: true },
   "/v1/reindex": { method: "POST", capability: TX_CAPABILITY, action: "datomic/reindex", invoke: (db, ref, source) => reindexD1(db, ref, source) },
-  "/v1/fold": { method: "POST", capability: TX_CAPABILITY, action: "datomic/fold", invoke: (db, ref, source) => foldD1(db, ref, source) },
-  "/v1/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: (db, ref, source) => qD1(db, ref, source) },
-  "/v1/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: (db, ref, source) => pullD1(db, ref, source) },
-  "/v1/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: (db, ref, source) => datomsD1(db, ref, source) },
-  "/v1/view": { method: "POST", capability: READ_CAPABILITY, action: "datomic/view", invoke: (db, ref, source) => viewD1(db, ref, source) },
+  "/v1/fold": { method: "POST", capability: TX_CAPABILITY, action: "datomic/fold", invoke: foldD1, r2Invoke: foldR2 },
+  "/v1/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: qD1, r2Invoke: qR2 },
+  "/v1/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: pullD1, r2Invoke: pullR2 },
+  "/v1/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: datomsD1, r2Invoke: datomsR2 },
+  "/v1/view": { method: "POST", capability: READ_CAPABILITY, action: "datomic/view", invoke: viewD1, r2Invoke: viewR2 },
   "/v1/tx-range": { method: "POST", capability: READ_CAPABILITY, action: "datomic/tx-range", invoke: (db, ref, source) => txRangeD1(db, ref, source) },
   "/v1/listeners/poll": { method: "POST", capability: READ_CAPABILITY, action: "datomic/listener-poll", invoke: (db, ref, source) => listenerD1(db, ref, source) },
   "/v1/listeners/register": { method: "POST", capability: TX_CAPABILITY, action: "datomic/listener-admin", invoke: (db, ref, source) => listenerD1(db, ref, source) },
@@ -536,16 +676,40 @@ export default {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") {
         const row = await env.DB.prepare("SELECT 1 AS ok").first();
+        let r2Parity = null;
+        if (r2Authority(env)) {
+          try {
+            const [stateRecord, rollbackMirror] = await Promise.all([
+              readParityState(env), rollbackMirrorStatus(env)
+            ]);
+            const state = stateRecord.value;
+            r2Parity = {
+              phase: state.phase,
+              checked: state.checked,
+              matched: state.matched,
+              failed: state.failed,
+              projection_skipped: state.projection_skipped,
+              large_projection_qualified: state.large_projection_qualified || 0,
+              latency: state.latency || null,
+              pass: state.pass ?? null,
+              rollback_mirror_ready: rollbackMirror.ready
+            };
+          } catch (_error) {
+            r2Parity = { phase: "unavailable", degraded: true };
+          }
+        }
         return json({
           ok: row?.ok === 1,
-          backend: "cloudflare-d1",
+          backend: r2Authority(env) ? "cloudflare-r2" : "cloudflare-d1",
+          authority: r2Authority(env) ? "r2-etag-cas" : "d1-cas",
           api: "datomic.client.api",
           wire: "application/edn",
           xrpc: false,
           routes: Object.keys(CLIENT_API_ROUTES).filter((p) => p.startsWith("/api/")),
           authn: "kotoba-lang/authentication:cacao",
           authz: "kotoba-lang/authorization:deny-by-default",
-          maturity: "client-api-beta"
+          maturity: "client-api-beta",
+          r2_parity: r2Parity
         });
       }
       if (request.method === "GET" && url.pathname === "/v1/session") {
@@ -555,6 +719,9 @@ export default {
       const authn = await authenticate(request, env);
       if (authn.error) return authn.error;
       if (request.method === "POST" && url.pathname === "/v1/commit") {
+        if (r2Authority(env)) {
+          return json({ ok: false, error: "LegacyCommitDisabled" }, 404);
+        }
         return commit(request, env, authn);
       }
       if (request.method === "GET" && url.pathname === "/v1/ref") {
@@ -563,13 +730,13 @@ export default {
       if (request.method === "GET" && url.pathname === "/v1/head") {
         return datomicRequest(
           request, env, authn, "datomic/head", READ_CAPABILITY,
-          (db, ref) => headD1(db, ref)
+          storageInvoke(env, headD1, headR2)
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/basis") {
         return datomicRequest(
           request, env, authn, "datomic/basis", READ_CAPABILITY,
-          (db, ref, source) => basisD1(db, ref, source)
+          storageInvoke(env, basisD1, basisR2)
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/status") {
@@ -583,7 +750,7 @@ export default {
       if (route && request.method === route.method) {
         return datomicRequest(
           request, env, authn, route.action, route.capability,
-          (db, ref, source) => route.invoke(db, ref, source),
+          storageInvoke(env, route.invoke, route.r2Invoke),
           { recordAlias: !!route.recordAlias }
         );
       }
@@ -595,5 +762,24 @@ export default {
         error: "InternalError"
       }, 500);
     }
+  },
+
+  async scheduled(_event, env, ctx) {
+    if (!r2Authority(env) || String(env.KOTOBASE_R2_PARITY || "0") !== "1") return;
+    const work = Array.from({ length: 4 }).reduce(
+      (promise) => promise.then((state) =>
+        !state || state.phase === "running" ? advanceSemanticParity(env) : state),
+      Promise.resolve(null)
+    );
+    ctx.waitUntil(work.then((state) => {
+      console.log("R2 semantic parity", JSON.stringify({
+        phase: state.phase,
+        checked: state.checked,
+        matched: state.matched,
+        failed: state.failed,
+        projection_skipped: state.projection_skipped,
+        large_projection_qualified: state.large_projection_qualified || 0
+      }));
+    }));
   }
 };
