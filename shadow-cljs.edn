@@ -22,6 +22,25 @@
    :compiler-options {:optimizations :advanced
                       :source-map false}}
 
+  :r2-engine
+  {:target :esm
+   :output-dir "dist"
+   :modules
+   {:kotobase-r2-engine
+    {:entries [kotobase.storage.r2-worker]
+     :exports
+     {headR2 kotobase.storage.r2-worker/head-edn!
+      basisR2 kotobase.storage.r2-worker/basis-edn!
+      transactR2 kotobase.storage.r2-worker/transact-edn!
+      qR2 kotobase.storage.r2-worker/q-edn!
+      pullR2 kotobase.storage.r2-worker/pull-edn!
+      datomsR2 kotobase.storage.r2-worker/datoms-edn!
+      foldR2 kotobase.storage.r2-worker/fold-edn!
+      viewR2 kotobase.storage.r2-worker/view-edn!
+      parityR2 kotobase.storage.r2-worker/parity!}}}
+   :compiler-options {:optimizations :advanced
+                      :source-map false}}
+
   ;; The storage contract against a real D1 (miniflare/SQLite), including
   ;; its concurrent half. A node-script rather than a JS harness so the
   ;; test is written in the same language as the code it tests.
@@ -29,4 +48,10 @@
   {:target :node-script
    :output-to "dist/contract-test.js"
    :main kotobase.storage.d1-contract-test/-main
+   :compiler-options {:optimizations :none}}
+
+  :r2-contract-test
+  {:target :node-script
+   :output-to "dist/r2-contract-test.js"
+   :main kotobase.storage.r2-contract-test/-main
    :compiler-options {:optimizations :none}}}}

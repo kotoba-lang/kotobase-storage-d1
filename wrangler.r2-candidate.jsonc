@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kotobase-storage-r2-candidate",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-07-26",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "candidate-storage.aozora.app", "custom_domain": true }
+  ],
+  "observability": { "enabled": true },
+  "limits": { "cpu_ms": 300000 },
+  "triggers": { "crons": ["* * * * *"] },
+  "build": { "command": "npx shadow-cljs release engine r2-engine" },
+  "vars": {
+    "KOTOBASE_AUTHORITY": "r2",
+    "KOTOBASE_R2_NAMESPACE": "production",
+    "KOTOBASE_R2_PARITY": "1",
+    "KOTOBASE_R2_PARITY_MAX_DATOMS": "10000",
+    "KOTOBASE_R2_GC": "0",
+    "KOTOBASE_R2_GRACE_SECONDS": "86400"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kotobase-d1-verification",
+      "database_id": "6f42fbb0-20ee-4187-9435-bd71b4e264bb"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "KOTOBASE_CANONICAL_R2",
+      "bucket_name": "kotobase-merkle-lsm"
+    }
+  ]
+}
