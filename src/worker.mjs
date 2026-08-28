@@ -12,6 +12,10 @@ import {
   headR2, basisR2, transactR2, qR2, pullR2, datomsR2, foldR2, viewR2,
   parityR2
 } from "../dist/kotobase-r2-engine.js";
+import {
+  headIPFS, basisIPFS, transactIPFS, qIPFS, pullIPFS, datomsIPFS, foldIPFS,
+  viewIPFS
+} from "../dist/kotobase-ipfs-engine.js";
 
 const TX_CAPABILITY = "kotoba://can/datom:transact";
 const READ_CAPABILITY = "kotoba://can/graph:query";
@@ -21,7 +25,37 @@ function r2Authority(env) {
   return String(env.KOTOBASE_AUTHORITY || "d1").trim().toLowerCase() === "r2";
 }
 
-function storageInvoke(env, d1Invoke, r2Invoke) {
+// Opt-in block provider (ADR-2608281000 Decision 2): blocks on a real,
+// independently operated IPFS network via kotobase.storage.ipfs-kubo; refs
+// stay on D1. Not the default -- selected only by an explicit
+// KOTOBASE_AUTHORITY=ipfs, and only usable once an operator supplies a real
+// Kubo endpoint (there is no built-in/default node). Never touches
+// env.KOTOBASE_CANONICAL_R2 or any other R2/B2 binding.
+function ipfsAuthority(env) {
+  return String(env.KOTOBASE_AUTHORITY || "d1").trim().toLowerCase() === "ipfs";
+}
+
+function ipfsConfig(env) {
+  return {
+    apiUrl: env.KOTOBASE_IPFS_API_URL,
+    gatewayUrl: env.KOTOBASE_IPFS_GATEWAY_URL,
+    token: env.KOTOBASE_IPFS_TOKEN
+  };
+}
+
+function ipfsConfigured(env) {
+  const config = ipfsConfig(env);
+  return Boolean(config.apiUrl && config.gatewayUrl);
+}
+
+function storageInvoke(env, d1Invoke, r2Invoke, ipfsInvoke) {
+  if (ipfsAuthority(env)) {
+    if (!ipfsInvoke || !ipfsConfigured(env)) {
+      return () => Promise.reject(new Error("IPFS authority route unavailable"));
+    }
+    const config = ipfsConfig(env);
+    return (db, ref, source) => ipfsInvoke(db, config, ref, source);
+  }
   if (!r2Authority(env)) return d1Invoke;
   if (!r2Invoke || !env.KOTOBASE_CANONICAL_R2) {
     return () => Promise.reject(new Error("R2 authority route unavailable"));
@@ -648,22 +682,22 @@ async function datomicRequest(
  */
 // dead helper removed — databaseRef() handles Client API db-name headers
 const CLIENT_API_ROUTES = {
-  "/api/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: transactD1, r2Invoke: transactR2, recordAlias: true, clientApi: true },
-  "/api/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: qD1, r2Invoke: qR2, clientApi: true },
-  "/api/qseq": { method: "POST", capability: READ_CAPABILITY, action: "datomic/qseq", invoke: qD1, r2Invoke: qR2, clientApi: true },
-  "/api/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: pullD1, r2Invoke: pullR2, clientApi: true },
-  "/api/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: datomsD1, r2Invoke: datomsR2, clientApi: true },
+  "/api/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: transactD1, r2Invoke: transactR2, ipfsInvoke: transactIPFS, recordAlias: true, clientApi: true },
+  "/api/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: qD1, r2Invoke: qR2, ipfsInvoke: qIPFS, clientApi: true },
+  "/api/qseq": { method: "POST", capability: READ_CAPABILITY, action: "datomic/qseq", invoke: qD1, r2Invoke: qR2, ipfsInvoke: qIPFS, clientApi: true },
+  "/api/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: pullD1, r2Invoke: pullR2, ipfsInvoke: pullIPFS, clientApi: true },
+  "/api/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: datomsD1, r2Invoke: datomsR2, ipfsInvoke: datomsIPFS, clientApi: true },
   "/api/tx-range": { method: "POST", capability: READ_CAPABILITY, action: "datomic/tx-range", invoke: (db, ref, source) => txRangeD1(db, ref, source), clientApi: true },
   "/api/db": { method: "POST", capability: READ_CAPABILITY, action: "datomic/db", invoke: (db, ref, source) => basisD1(db, ref, source), clientApi: true },
   "/api/with": { method: "POST", capability: READ_CAPABILITY, action: "datomic/with", invoke: (db, ref, source) => transactD1(db, ref, source), clientApi: true },
   // Legacy aliases — same handlers, not XRPC
-  "/v1/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: transactD1, r2Invoke: transactR2, recordAlias: true },
+  "/v1/transact": { method: "POST", capability: TX_CAPABILITY, action: "datomic/transact", invoke: transactD1, r2Invoke: transactR2, ipfsInvoke: transactIPFS, recordAlias: true },
   "/v1/reindex": { method: "POST", capability: TX_CAPABILITY, action: "datomic/reindex", invoke: (db, ref, source) => reindexD1(db, ref, source) },
-  "/v1/fold": { method: "POST", capability: TX_CAPABILITY, action: "datomic/fold", invoke: foldD1, r2Invoke: foldR2 },
-  "/v1/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: qD1, r2Invoke: qR2 },
-  "/v1/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: pullD1, r2Invoke: pullR2 },
-  "/v1/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: datomsD1, r2Invoke: datomsR2 },
-  "/v1/view": { method: "POST", capability: READ_CAPABILITY, action: "datomic/view", invoke: viewD1, r2Invoke: viewR2 },
+  "/v1/fold": { method: "POST", capability: TX_CAPABILITY, action: "datomic/fold", invoke: foldD1, r2Invoke: foldR2, ipfsInvoke: foldIPFS },
+  "/v1/q": { method: "POST", capability: READ_CAPABILITY, action: "datomic/q", invoke: qD1, r2Invoke: qR2, ipfsInvoke: qIPFS },
+  "/v1/pull": { method: "POST", capability: READ_CAPABILITY, action: "datomic/pull", invoke: pullD1, r2Invoke: pullR2, ipfsInvoke: pullIPFS },
+  "/v1/datoms": { method: "POST", capability: READ_CAPABILITY, action: "datomic/datoms", invoke: datomsD1, r2Invoke: datomsR2, ipfsInvoke: datomsIPFS },
+  "/v1/view": { method: "POST", capability: READ_CAPABILITY, action: "datomic/view", invoke: viewD1, r2Invoke: viewR2, ipfsInvoke: viewIPFS },
   "/v1/tx-range": { method: "POST", capability: READ_CAPABILITY, action: "datomic/tx-range", invoke: (db, ref, source) => txRangeD1(db, ref, source) },
   "/v1/listeners/poll": { method: "POST", capability: READ_CAPABILITY, action: "datomic/listener-poll", invoke: (db, ref, source) => listenerD1(db, ref, source) },
   "/v1/listeners/register": { method: "POST", capability: TX_CAPABILITY, action: "datomic/listener-admin", invoke: (db, ref, source) => listenerD1(db, ref, source) },
@@ -698,10 +732,16 @@ export default {
             r2Parity = { phase: "unavailable", degraded: true };
           }
         }
+        const backend = ipfsAuthority(env)
+          ? "ipfs-kubo-with-d1-refs"
+          : (r2Authority(env) ? "cloudflare-r2" : "cloudflare-d1");
+        const authority = ipfsAuthority(env)
+          ? "d1-cas"
+          : (r2Authority(env) ? "r2-etag-cas" : "d1-cas");
         return json({
           ok: row?.ok === 1,
-          backend: r2Authority(env) ? "cloudflare-r2" : "cloudflare-d1",
-          authority: r2Authority(env) ? "r2-etag-cas" : "d1-cas",
+          backend,
+          authority,
           api: "datomic.client.api",
           wire: "application/edn",
           xrpc: false,
@@ -709,7 +749,8 @@ export default {
           authn: "kotoba-lang/authentication:cacao",
           authz: "kotoba-lang/authorization:deny-by-default",
           maturity: "client-api-beta",
-          r2_parity: r2Parity
+          r2_parity: r2Parity,
+          ipfs_authority_configured: ipfsAuthority(env) ? ipfsConfigured(env) : null
         });
       }
       if (request.method === "GET" && url.pathname === "/v1/session") {
@@ -719,7 +760,12 @@ export default {
       const authn = await authenticate(request, env);
       if (authn.error) return authn.error;
       if (request.method === "POST" && url.pathname === "/v1/commit") {
-        if (r2Authority(env)) {
+        if (r2Authority(env) || ipfsAuthority(env)) {
+          // This legacy path writes blocks into D1's kotobase_blocks table
+          // directly, bypassing the composed backend entirely -- under
+          // ipfsAuthority that would silently put block bytes on D1 while
+          // the ref they get published under is meant to resolve blocks
+          // from IPFS, so it is disabled the same way r2Authority disables it.
           return json({ ok: false, error: "LegacyCommitDisabled" }, 404);
         }
         return commit(request, env, authn);
@@ -730,13 +776,13 @@ export default {
       if (request.method === "GET" && url.pathname === "/v1/head") {
         return datomicRequest(
           request, env, authn, "datomic/head", READ_CAPABILITY,
-          storageInvoke(env, headD1, headR2)
+          storageInvoke(env, headD1, headR2, headIPFS)
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/basis") {
         return datomicRequest(
           request, env, authn, "datomic/basis", READ_CAPABILITY,
-          storageInvoke(env, basisD1, basisR2)
+          storageInvoke(env, basisD1, basisR2, basisIPFS)
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/status") {
@@ -750,7 +796,7 @@ export default {
       if (route && request.method === route.method) {
         return datomicRequest(
           request, env, authn, route.action, route.capability,
-          storageInvoke(env, route.invoke, route.r2Invoke),
+          storageInvoke(env, route.invoke, route.r2Invoke, route.ipfsInvoke),
           { recordAlias: !!route.recordAlias }
         );
       }

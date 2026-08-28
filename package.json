@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "build": "shadow-cljs release engine r2-engine",
+    "build": "shadow-cljs release engine r2-engine ipfs-engine",
     "check": "shadow-cljs compile engine",
     "deploy": "npm run build && wrangler deploy",
     "dev": "npm run build && wrangler dev",
@@ -13,7 +13,8 @@
     "test:r2-backfill": "node --test test/r2-backfill-worker.test.mjs",
     "test:core": "node --test test/kotobase-core.test.mjs",
     "test:r2-authority": "shadow-cljs compile r2-contract-test && node dist/r2-contract-test.js",
-    "test": "node --test test/successor.test.mjs && shadow-cljs compile contract-test && node dist/contract-test.js && npm run test:core && npm run test:r2-backfill && npm run test:r2-authority"
+    "test:ipfs-authority": "shadow-cljs compile ipfs-contract-test && node dist/ipfs-contract-test.js",
+    "test": "node --test test/successor.test.mjs && shadow-cljs compile contract-test && node dist/contract-test.js && npm run test:core && npm run test:r2-backfill && npm run test:r2-authority && npm run test:ipfs-authority"
   },
   "devDependencies": {
     "@ipld/dag-cbor": "^9.2.1",
