@@ -1,9 +1,19 @@
 {:paths ["src-cljs"]
  :deps {thheller/shadow-cljs {:mvn/version "3.4.11"}
         org.clojure/clojurescript {:mvn/version "1.12.145"}
+        ;; Bumped from b507198f (2026-08-19-ish) to pick up `compose`/
+        ;; `ComposedBackend` (kotobase-storage#f360866/#b833ed5), which
+        ;; ipfs-worker.cljs needs. Purely additive over b507198f -- IBlockStore/
+        ;; IRefStore/IBackendCapabilities are unchanged, so d1-worker/r2-worker
+        ;; are unaffected (verified: this repo's full `npm test` still passes).
         io.github.kotoba-lang/kotobase-storage
         {:git/url "https://github.com/kotoba-lang/kotobase-storage.git"
-         :git/sha "b507198f4a27b71196d8b6e212451fe8edd3393e"}
+         :git/sha "e52ddaad020e7d9f790a1839cf77e69f97ff731e"}
         io.github.kotoba-lang/kotobase-engine
         {:git/url "https://github.com/kotoba-lang/kotobase-engine.git"
-         :git/sha "bdc057bef0bc88b289f6f24e086a50884ee363c4"}}}
+         :git/sha "bdc057bef0bc88b289f6f24e086a50884ee363c4"}
+        ;; kotobase.storage.ipfs-worker only -- the opt-in
+        ;; KOTOBASE_AUTHORITY=ipfs block provider (ADR-2608281000 Decision 2).
+        io.github.kotoba-lang/kotobase-storage-ipfs
+        {:git/url "https://github.com/kotoba-lang/kotobase-storage-ipfs.git"
+         :git/sha "0e8bb214dcb388f3203879cee7be0acdd98ef7b4"}}}

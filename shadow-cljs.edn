@@ -41,6 +41,29 @@
    :compiler-options {:optimizations :advanced
                       :source-map false}}
 
+  ;; Opt-in block provider (ADR-2608281000 Decision 2): blocks on a real
+  ;; independently operated IPFS network, refs still on D1. Not built into
+  ;; the default `engine`/`r2-engine` bundles worker.mjs already imports --
+  ;; a separate module so a deployment that never sets KOTOBASE_AUTHORITY=ipfs
+  ;; never ships this code path.
+  :ipfs-engine
+  {:target :esm
+   :output-dir "dist"
+   :modules
+   {:kotobase-ipfs-engine
+    {:entries [kotobase.storage.ipfs-worker]
+     :exports
+     {headIPFS kotobase.storage.ipfs-worker/head-edn!
+      basisIPFS kotobase.storage.ipfs-worker/basis-edn!
+      transactIPFS kotobase.storage.ipfs-worker/transact-edn!
+      qIPFS kotobase.storage.ipfs-worker/q-edn!
+      pullIPFS kotobase.storage.ipfs-worker/pull-edn!
+      datomsIPFS kotobase.storage.ipfs-worker/datoms-edn!
+      foldIPFS kotobase.storage.ipfs-worker/fold-edn!
+      viewIPFS kotobase.storage.ipfs-worker/view-edn!}}}
+   :compiler-options {:optimizations :advanced
+                      :source-map false}}
+
   ;; The storage contract against a real D1 (miniflare/SQLite), including
   ;; its concurrent half. A node-script rather than a JS harness so the
   ;; test is written in the same language as the code it tests.
@@ -54,4 +77,10 @@
   {:target :node-script
    :output-to "dist/r2-contract-test.js"
    :main kotobase.storage.r2-contract-test/-main
+   :compiler-options {:optimizations :none}}
+
+  :ipfs-contract-test
+  {:target :node-script
+   :output-to "dist/ipfs-contract-test.js"
+   :main kotobase.storage.ipfs-contract-test/-main
    :compiler-options {:optimizations :none}}}}
