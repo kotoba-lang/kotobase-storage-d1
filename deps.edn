@@ -1,5 +1,10 @@
 {:paths ["src-cljs"]
- :deps {thheller/shadow-cljs {:mvn/version "3.4.11"}
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       thheller/shadow-cljs {:mvn/version "3.4.11"}
         org.clojure/clojurescript {:mvn/version "1.12.145"}
         ;; Bumped from b507198f (2026-08-19-ish) to pick up `compose`/
         ;; `ComposedBackend` (kotobase-storage#f360866/#b833ed5), which
