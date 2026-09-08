@@ -5,7 +5,7 @@
   when its published head equals kotobase_refs.cid; any unsupported or lagging
   projection therefore falls back to the canonical hydrate/query engine."
   (:require [cljs.reader :as reader]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.datomic :as d]))
 
 (defn- invoke [target method & args]

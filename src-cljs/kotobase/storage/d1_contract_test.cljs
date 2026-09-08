@@ -23,7 +23,7 @@
   (:require ["miniflare" :refer [Miniflare]]
             ["node:fs" :as fs]
             ["node:path" :as path]
-            [clojure.string :as string]
+            [kotoba.lang.text :as string]
             [kotobase.storage.async-contract :as contract]
             [kotobase.storage.core :as storage]
             [kotobase.storage.d1-worker :as d1]))

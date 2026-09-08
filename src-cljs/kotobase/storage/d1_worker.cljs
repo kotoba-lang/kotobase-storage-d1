@@ -3,7 +3,7 @@
 
   The exported boundary accepts and returns EDN so Datomic keywords, symbols,
   sets, pull selectors, and query vectors survive the JavaScript transport."
-  (:require [clojure.string :as string]
+  (:require [kotoba.lang.text :as string]
             [cljs.reader :as reader]
             [kotobase.datomic :as d]
             [kotobase.engine :as engine]
