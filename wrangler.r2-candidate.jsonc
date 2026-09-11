@@ -10,7 +10,7 @@
   "observability": { "enabled": true },
   "limits": { "cpu_ms": 300000 },
   "triggers": { "crons": ["* * * * *"] },
-  "build": { "command": "npx shadow-cljs release engine r2-engine" },
+  "build": { "command": "amu compile --target wasm32-browser engine r2-engine" },
   "vars": {
     "KOTOBASE_AUTHORITY": "r2",
     "KOTOBASE_R2_NAMESPACE": "production",
